@@ -1,0 +1,42 @@
+{
+  "name": "dsh-remember-workspace-settings",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remembers the agent preset and the provider/model/reasoning-effort last used in each working directory, and re-applies them to that workspace's next blank session.",
+  "license": "MIT",
+  "author": "chuikingshek <git@chuikingshek.com>",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "workspace",
+    "preset",
+    "model"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/logic.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.1.0",
+    "@deepseek-ai/schemastery": ">=3.19.0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.2.0",
+    "zod": ">=4.6.0"
+  }
+}

@@ -1,0 +1,9 @@
+# Per-workspace launch defaults.
+#
+# One Host-only row. It listens to the durable session events that record a
+# preset switch and a model switch, stores the last values per working
+# directory in its own storage domain, and re-applies them to the next blank
+# Session created in that directory.
+- insert:
+    - id: remember-workspace-settings
+      name: dsh-remember-workspace-settings

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Workspace launch defaults",
+    "description": "Remembers the agent preset and the provider, model, and reasoning effort used in each working directory, then applies them again to that workspace's next blank session. Run a preset, or pick a model, anywhere in a workspace and the next new session there starts with the same choices; other workspaces keep their own. Only blank sessions are touched, a preset named on purpose by the session creator is left alone, subagent sessions and forks are ignored, and a turn on the configured default preset counts as no preference so that workspace keeps following the default. Memory is stored on this host in the plugin's own storage domain, not in the session log; turning the plugin off stops both remembering and applying but keeps the stored values."
+  }
+}
