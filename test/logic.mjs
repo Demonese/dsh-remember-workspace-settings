@@ -15,8 +15,9 @@
  * DSH installation that provides the four peer packages. When it is omitted,
  * the test tries to resolve @deepseek-ai/dsh from its own module path.
  *
- * Exit codes: 0 all checks passed; 2 skipped because no installation was found
- * or this Node lacks module.registerHooks.
+ * Exit codes: 0 all checks passed; 1 a check failed or this Node is too old
+ * to import module.registerHooks; 2 skipped because no usable DSH
+ * installation was found.
  */
 
 import assert from 'node:assert/strict'

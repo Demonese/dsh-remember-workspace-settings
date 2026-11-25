@@ -23,7 +23,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "docs/*.md"
   ],
   "scripts": {
     "test": "node test/logic.mjs"
