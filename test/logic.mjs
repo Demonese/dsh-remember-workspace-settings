@@ -16,8 +16,8 @@
  * the test tries to resolve @deepseek-ai/dsh from its own module path.
  *
  * Exit codes: 0 all checks passed; 1 a check failed or this Node is too old
- * to import module.registerHooks; 2 skipped because no usable DSH
- * installation was found.
+ * to import module.registerHooks; 2 skipped because no DSH installation or
+ * manifest was found.
  */
 
 import assert from 'node:assert/strict'
@@ -238,7 +238,7 @@ await checkAsync('rememberPreset records a non-default preset and clears a defau
 
 // ---------------------------------------------------------------- applyPreset
 
-await checkAsync('applyPreset yields to an explicitly requested preset', async () => {
+await checkAsync('applyPreset yields to an explicitly requested non-default preset', async () => {
   const agent = { session: session({ cwd: OTHER }) }
   let calls = 0
   let running = 'cordis'
@@ -366,13 +366,14 @@ check('package.json, patch, and locales agree', () => {
   assert.ok(existsSync(join(dir, 'icon.svg')))
 })
 
-check('the dsh peer range passes the installation compatibility gate', () => {
+check('the dsh peer range passes the installation compatibility check', () => {
   const dir = fileURLToPath(new URL('..', import.meta.url))
   const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
   const appBootRoot = packageRootOf(resolvePackage('@deepseek-ai/dsh-app-boot'))
   const semver = createRequire(join(appBootRoot, 'package.json'))('semver')
   const runtime = JSON.parse(readFileSync(INSTALL_MANIFEST, 'utf8')).version
-  // evaluatePluginCompatibility checks only @deepseek-ai/dsh* peers, with includePrerelease.
+  // The gate prefers engines.dsh over peers; this manifest has no engines, so
+  // check the one dsh peer with includePrerelease.
   const range = manifest.peerDependencies['@deepseek-ai/dsh-storage-domain']
   assert.ok(
     semver.satisfies(runtime, range, { includePrerelease: true }),

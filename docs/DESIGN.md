@@ -9,7 +9,7 @@
 | [测试与发布](test.md) | 测试原理、运行方式、修改后的验证与发布检查 |
 | [DSH 探索笔记](dsh-exploration-notes.md) | 源码核实过的 DSH 平台机制、版本基线与升级复核清单 |
 
-> 版本基线：DSH **0.2.2-rc.5**。DSH 机制与源码证据集中在 [DSH 探索笔记](dsh-exploration-notes.md)，本文只保留设计所需的摘要；升级 DSH 后先按笔记中的清单复核，再改插件行为。
+> 版本基线：DSH **0.2.2-rc.5**（源码复核基线：release merge `9c2670d`）。DSH 机制与源码证据集中在 [DSH 探索笔记](dsh-exploration-notes.md)，本文只保留设计所需的摘要；升级 DSH 后先按笔记中的清单复核，再改插件行为。
 
 ## 1. 问题与目标
 
@@ -25,7 +25,7 @@
 两个细节决定了需求的形状：
 
 1. **换模型会顺手改全局默认。** GUI 的模型选择走 `session/selectModel`，它在记录会话选择之后还会后台调用 `agentDefaultModel.saveSelection(selected)`。所以“上次用的模型”确实被记住了，但记住的是**全局**的：在 A 工作区换了模型，B 工作区的新会话也会跟着用。
-2. **换 preset 不会改全局默认。** UI 上换模式只写会话日志，`selectedDefault` 只在 Settings 里改。所以新会话永远回到配置里的那个默认 preset。
+2. **换 preset 不会改全局默认。** UI 上换模式只写会话日志，`selectedDefault` 只在 Settings 里改。所以在没有本插件时，未显式指定 preset 的新会话会回到配置里的那个默认 preset；显式指定的非默认 preset 仍按请求运行。
 
 目标因此是：把这两套全局记忆降维成**按工作目录**的记忆，并补上 preset 那条缺失的路径。
 
@@ -55,6 +55,8 @@
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
+图中的 recall 只覆盖新建/冷恢复路径；live blank 复用不派发 `agent/created`，不会进入 recall。remember 分支仍会收到 live 会话的 `turn/start` 与 `model/selection`（见 §5）。
+
 记录形状：
 
 ```js
@@ -76,22 +78,22 @@
 
 | 机制 | 结论 | 对设计的约束 |
 |---|---|---|
-| 会话创建请求 | 只有 `workspaceId / cwd / sessionId / agentPreset`，没有模型字段 | preset 可在创建时给；模型只能在 `agent/created` 之后写 |
-| `agent/created` | serial、被 await，发生在 agent 已进入 registry、会话仍空白、创建响应返回之前 | 这是唯一安全的应用窗口；监听器抛错会让整个会话创建失败，必须整段 catch |
+| 会话创建请求 | 只有 `workspaceId / cwd / sessionId / agentPreset`，没有模型字段 | preset 可在创建时给；模型只能在会话存在之后写 |
+| `agent/created` | serial、被 await；新建和冷恢复时在 agent 进入 registry 后、创建响应返回前触发；冷恢复有历史的会话（`agents.resume`）也会触发，事件本身不保证空白 | 新建/冷恢复路径的应用窗口；监听器必须自行用 `isBlank` 过滤（冷恢复的历史会话可能已有 turn）；抛错会让整个创建失败，必须整段 catch |
 | `agentPresets.select()` | 只能用于空白会话；相同值 no-op；按 agent 串行；成功时 append `agent-preset/selected` | 可以安全地重复应用记忆；已开始的会话由 registry 拒绝 |
 | `agent.model.select()` | 只 append `model/selection`，不改全局默认 | 应用模型用这个低层写入，不能用 `session/selectModel` |
 | `turn/start` | 记录这一轮实际运行的 preset 的可靠时机 | 记录 preset 用 `turn/start`，不用创建阶段的 `agent-preset/selected` |
 | `ctx.storageDomain` | 提供 schema 校验、同步读、持久写和按域写链 | 插件用独立 domain 存记忆；记忆本身不写会话日志、不进入模型上下文 |
 | 会话 header | 子代理 `origin === 'subagent'`；fork 用 `isSeeded`（旧格式可能带 `parentSession`） | 子代理始终跳过，fork 默认跳过 |
-| linked layer | 裸导入只有列在插件自身 `peerDependencies` 里才会被安装树拦截 | 四个运行时包必须列 peer，`dependencies` 必须为空 |
+| linked layer | 从插件目录向上逐层读取 `peerDependencies`，命中即拦截到安装树；插件自身 manifest 的声明是实际生效的那一份 | 四个运行时包必须列 peer，`dependencies` 不得声明（空对象也会被测试拒绝） |
 
 ## 4. 关键实现决定
 
 - **同一 key 的读-改-写串行化（`writeChain`）。** 预设事件和模型事件可能几乎同时到达；串行化避免两次读拿到同一份旧记录、后写覆盖先写。写链失败只 warn，不阻断后续写入。
 - **`undefined` 表示删除字段。** 清除推理强度会回到适配器默认；清除预设表示“没有偏好”。字段全空时删除整条记录，不留空壳。
 - **默认预设 = 无偏好。** 用默认预设跑的一轮清掉 `agentPreset`，让工作区继续跟随 Settings 里默认值的变化，而不是被钉死在旧值。
-- **显式预设让位。** 创建请求显式点名了非默认 preset（Creator 等流程）时，`applyPreset` 不覆盖；只有“按默认创建”的会话才套用记忆值。没有记录预设的会话会接受记忆值。
-- **模型先解析调用配置再写。** `llm.resolveCallConfig(target)` 只验证 provider 有已注册 adapter、模型信息可解析、显式 reasoning effort 被支持；它不检查登录凭证或目录可选性（`session/selectModel` 才额外做 `requireModel` / `modelAvailable`）。失败只跳过模型这一半并 warn。
+- **显式预设让位（仅限非默认）。** 创建请求显式点名了非默认 preset（Creator 等流程）时，`applyPreset` 不覆盖；显式点名默认 preset 与按默认创建在 header/projection 上不可区分，仍会被记忆覆盖；没有记录预设的会话会接受记忆值。
+- **模型先比当前选择，再解析调用配置，最后写。** 相同选择直接跳过（连校验也不做）；不同选择才通过 `llm.resolveCallConfig(target)` 验证 provider 有已注册 adapter、模型信息可解析、显式 reasoning effort 被支持；它不检查登录凭证或目录可选性（`session/selectModel` 才额外做 `requireModel` / `modelAvailable`）。失败只跳过模型这一半并 warn。
 - **不写重复事件。** 应用前先比 `agent.model.current()`；记录时比较除 `updatedAt` 外的字段。注意 `agent.model.select` 只和已记录值比较，没有记录时会无条件 append，所以应用侧的去重必须自己做。
 - **绝不改全局默认。** 只调用 `agent.model.select()`；`session/selectModel` 会顺手 `agentDefaultModel.saveSelection`，禁止使用。
 - **绝不外抛。** `agent/created` 的监听器抛错会让整个会话创建失败，所以应用逻辑整段捕获；`session/event` 的记录逻辑同样捕获，坏记录不能影响正在进行的对话。
@@ -100,33 +102,36 @@
 
 ## 5. 边界情况与已知取舍
 
+本节把“复用”分成两种：**冷恢复**（会话已落盘、当前进程没有 live agent，重新打开时走 `agents.resume`）和 **live 复用**（进程内仍存活的空白会话被 `session/create` 直接拿回）。
+
 | 场景 | 行为 | 依据 |
 |---|---|---|
 | 子代理会话 | 既不记录也不应用 | `header.origin === 'subagent'` |
 | fork 会话 | 默认跳过；`skipForks: false` 时参与 | `header.isSeeded === true`（现代 fork）或 `parentSession` |
 | 打开有历史的会话 | 不应用 | `openTurnStartSeq === null && lastTurn === 0` |
-| 复用同一个空白会话 | 重复应用同一值 → 无副作用 | `presets.select` 与 `model.select` 的相等判定 |
+| 复用已落盘的空白会话（冷恢复） | 按 §4 规则重新应用记忆（显式非默认请求除外）；重复应用同一值 → 无副作用 | `agents.resume` → `agent/created`；`presets.select` 与 `model.select` 的相等判定 |
+| 复用进程内仍存活的空白会话（live） | Host 直接 `presets.select` 到请求/默认值，不触发 `agent/created`；插件不参与，下一轮 `turn/start` 可能把工作区预设偏好清掉 | `reuseLive()`；见探索笔记 §1/§2 |
 | 记忆里的 preset 被删/改名 | 保留当前预设，warn | `select` 抛 `agent-preset/not-found` / `invalid` |
 | 模型没有 adapter / 元信息不可用 / effort 不支持 | 只跳过模型，preset 照常 | `resolveCallConfig` 抛错 |
 | provider 未登录 / 模型不在目录中 | 不保证拦截；可能先应用，真实请求时才失败 | 这里只调 `resolveCallConfig`，不做 `requireModel` / `modelAvailable` |
 | 用户在空白会话里手动改 preset/model | 模型立即记录；预设在下一轮 `turn/start` 记录 | `turn/start` 与 `model/selection` 都会进 remember |
-| 多窗口 / 多进程同时写 | 同进程内单一写链；跨进程后写覆盖 | JSON 存储后端是单进程写链 |
+| 多窗口 / 多进程同时写 | 同进程内单一写链；跨进程没有文件锁，后写者按整份内存快照重写 unit 文件，可能覆盖其他进程的写入/删除 | storage-domain 的按域写链只在进程内；storage-json 只做原子整文件替换 |
 | 工作区改名/移动 | 变成一份新记忆，旧记录保留 | 按 cwd 作 key 的固有限制 |
 | 目录大小写差异 | Windows 下键转小写 | `workspaceKey()` |
 | symlink 指向同一目录 | 不做 `realpath`，按传入 cwd 的绝对路径分别记忆 | `workspaceKey()` |
 | git worktree | 每个 worktree 各自一份记忆 | worktree 的 cwd 不同 |
-| 首次应用的重挂载 | 一次额外 mount/unmount，通常只表现为“打开稍慢” | 发生在 creation resolve 前 |
+| 首次应用的重挂载（新建/冷恢复） | 记忆 preset 存在且与 Host 目标不同时多一次 mount/unmount；没有 preset 记忆或值相同时为 0 | 发生在 creation resolve 前；live 复用不触发插件 |
 | 插件自身抛错 | 不影响会话创建 | 全量 try/catch |
-| 存储文件损坏 / 版本不匹配 | 记录 warning，以“无记忆”状态继续 | `storageDomain.open()` 失败被捕获 |
+| 存储文件损坏 / 版本不匹配 / 记录不符合 schema | 记录 warning，以“无记忆”状态继续 | `storageDomain.open()` 失败被捕获；默认不跳过坏记录 |
 
 其中需要特别理解的取舍：
 
-- **会多一次组合挂载。** 按默认预设打开一个已有空白会话的工作区时，Host 会先用默认预设组装它，插件随后切到记忆值，因此比不用插件多一次预设重挂载（空白会话上成本很小）。这是 Host 创建路径决定的，Host-only 方案绕不开。
+- **会多一次组合挂载。** 当记忆里确实有非默认 preset、且与 Host 的默认目标不同时，按默认预设冷恢复一个已有空白会话会先用默认预设组装它，插件随后切到记忆值，因此比不用插件多一次预设重挂载（空白会话上成本很小）。这是 Host 创建路径决定的，Host-only 方案绕不开。live 复用不触发 `agent/created`，不会发生这次插件侧重挂载；没有 preset 记忆或值相同时也不会有额外重挂载。
 - **预设只按“实际跑过”记录。** 空白会话里选好模式但没发消息，不会被记住。这是有意的：记忆应当反映真实使用，而不是界面上的临时状态。
-- **模型没有“创建时参数”。** 应用时机是会话刚创建、尚未开始。正常客户端等待 `session/create` 响应后才发第一条消息，此时应用已经完成；只有绕过创建响应、在创建尚未 resolve 时直接用同一 sessionId 发消息的流程才理论上有窗口。
-- **GUI 的模型选择会改全局默认。** 这是 `session/selectModel` 的行为；插件自身不改。因此“新会话初始模型恰好等于记忆值”时没有写入事件是正常现象。
+- **模型没有“创建时参数”。** 应用时机是会话刚创建、尚未开始。正常客户端等待 `session/create` 响应后才发第一条消息，此时新建/冷恢复路径的应用已经完成；live 复用不派发 `agent/created`，插件不会重新应用。只有绕过创建响应、在创建尚未 resolve 时直接用同一 sessionId 发消息的流程才理论上有窗口。
+- **GUI 的模型选择会改全局默认。** 这是 `session/selectModel` 的行为；插件自身不改。因此“新会话初始模型恰好等于记忆值”时没有写入事件是正常现象；此时该空白会话没有 `model/selection` 记录，仍跟随全局默认，首轮前若默认被改，本次会话会用新默认（下一个新建/冷恢复的空白会话才会重新应用记忆）。
 - **没有设置页。** 查看/清除记忆需要直接编辑存储 JSON；清除后该工作区回到全局默认。
-- **Creator 的连带效果。** 在某个工作区用 Creator 模式跑过一轮后，该工作区下次新建会话也会是 Creator 模式——这就是“上次使用”的语义；切回默认预设跑一轮即可清除该偏好。
+- **Creator 的连带效果。** 前提是 Creator（`cordis`）不是当前默认 preset：在某个工作区用 Creator 模式跑过一轮后，该工作区下次新建或冷恢复的空白会话也会是 Creator 模式——这就是“上次使用”的语义；切回默认预设跑一轮即可清除该偏好。若该空白仍是 live 会话并被再次复用，Host 可能先切到请求/默认预设，下一轮会清掉该偏好。
 
 ## 6. 安装、配置与数据
 
@@ -157,8 +162,8 @@
 | 字段 | 默认 | 作用 |
 |---|---|---|
 | `enabled` | `true` | 总开关；关闭后既不记录也不应用 |
-| `applyPreset` | `true` | 是否把记忆的预设应用到空白会话 |
-| `applyModel` | `true` | 是否把记忆的模型/推理强度应用到空白会话 |
+| `applyPreset` | `true` | 是否把记忆的预设应用到新建/冷恢复的空白会话 |
+| `applyModel` | `true` | 是否把记忆的模型/推理强度应用到新建/冷恢复的空白会话 |
 | `rememberPreset` | `true` | 是否把“实际运行的预设”记入工作区记忆 |
 | `rememberModel` | `true` | 是否把模型变更记入工作区记忆 |
 | `skipForks` | `true` | fork 出来的会话不参与（既不应用也不记录） |
@@ -182,28 +187,36 @@ $DSH_HOME/storages/workspace_launch_defaults.json
 
 `$DSH_HOME` 默认是 `~/.dsh`（Windows 上是 `%USERPROFILE%\.dsh`），可以用 `DSH_HOME` 环境变量覆盖。
 
-一个工作目录一条记录：
+文件是 storage-json 的 single-unit 文档，记录挂在 `tables.workspaces` 下，一个工作目录一条：
 
 ```json
 {
-  "path": "/home/you/projects/demo",
-  "agentPreset": "ptc",
-  "provider": "your-provider",
-  "model": "your-model",
-  "reasoningEffort": "high",
-  "updatedAt": 1764000000000
+  "unit": { "name": "workspace_launch_defaults", "version": 1 },
+  "global": null,
+  "tables": {
+    "workspaces": {
+      "/home/you/projects/demo": {
+        "path": "/home/you/projects/demo",
+        "agentPreset": "ptc",
+        "provider": "your-provider",
+        "model": "your-model",
+        "reasoningEffort": "high",
+        "updatedAt": 1764000000000
+      }
+    }
+  }
 }
 ```
 
 存储键是规范化后的绝对工作目录：`path.resolve(cwd)`，Windows 上再转小写；记录里的 `path` 保留会话创建时的写法，便于阅读。
 
-**重置某个工作区**：停掉 DSH，删除该 JSON 里对应的键（或整个文件），再启动。文件损坏或版本不匹配时，插件会记录一条 warning 并以“无记忆”状态继续运行，不会阻塞 DSH 启动。
+**重置某个工作区**：停掉 DSH，删除 `tables.workspaces` 里对应的键（或整个文件），再启动。文件损坏或版本不匹配时，插件会记录一条 warning 并以“无记忆”状态继续运行，不会阻塞 DSH 启动。
 
 ## 7. 打包与加载
 
 这是一个 **Host-only bundle**：没有 client 半、没有构建步骤、没有安装脚本。`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 只 `insert` 一行。
 
-运行时包由 DSH 安装树提供：4 个裸导入必须列在插件自己的 `peerDependencies` 里，`dependencies` 必须为空；否则 linked layer 可能解析不到，或装出第二份 cordis / zod。版本闸门与源码依据见 [DSH 探索笔记](dsh-exploration-notes.md) 第 9 节。
+运行时包由 DSH 安装树提供：本插件的 4 个裸导入必须列在插件自己的 `peerDependencies` 里，`dependencies` 不得声明（空对象也会被测试拒绝）；否则 linked layer 可能解析不到，或装出第二份 cordis / zod。版本闸门与源码依据见 [DSH 探索笔记](dsh-exploration-notes.md) 第 9 节。
 
 ## 8. 代码地图与开发约定
 
@@ -212,7 +225,7 @@ $DSH_HOME/storages/workspace_launch_defaults.json
 | 文件 | 作用 |
 |---|---|
 | `index.js` | 插件的全部逻辑（Service 类默认导出） |
-| `package.json` | bundle 清单：`dsh.bundle.patch`、exports、files；`dependencies` 为空，4 个裸导入列在 `peerDependencies` |
+| `package.json` | bundle 清单：`dsh.bundle.patch`、exports、files；未声明 `dependencies`，4 个裸导入列在 `peerDependencies` |
 | `cordis.patch.yml` | 安装时 `insert` 一行 `remember-workspace-settings` |
 | `locale/{en,zh}.json` | Plugin Manager 的标题/描述（未声明 `meta.detail`，详情页回落到 README） |
 | `icon.svg` | 36×36 图标（文件夹 + 时钟，无文字） |
