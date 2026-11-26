@@ -74,7 +74,7 @@ Node 22.15+ 是硬要求：`registerHooks` 是静态命名导入，低版本 Nod
 | `writeRecord` | 合并字段、`undefined` 清除字段、空记录删除、内容未变化时不写 |
 | `onSessionEvent` / 首轮记录 | `turn/start` 且 `turn === 1` 时记录实际 preset（包括默认 preset）与 effective model；`turn: 2` 不重写；单独 `model/selection` 不写；`rememberPreset` / `rememberModel` 开关；preset 读取失败不影响 model 半；缺失 preset/agent service 时不抛错也不写空记录 |
 | `applyPreset` | 显式请求的**非默认**预设让位；默认创建的会话套用记忆；没有记录预设的会话套用记忆；记忆值是默认 preset 时也应用 |
-| `applyModel` | 相同选择不重写也不校验；不同选择写入；校验失败只跳过并 warn 一次 |
+| `applyModel` | 校验后无条件写入；没有记录时即使等于当前选择也写入一条钉住事件；对已记录值重复应用 no-op（校验仍会执行）；校验失败只跳过并 warn 一次 |
 | `applyDefaults` | 只处理空白会话；有记忆才动作；没有记忆时无副作用 |
 | 打包清单 | `dsh.bundle.patch` 指向 `cordis.patch.yml`；未声明 `dependencies`（空对象也会被拒绝）；4 个 peer 存在；patch 名称、locale 标题/描述、`icon.svg` 存在 |
 | 版本兼容检查 | `@deepseek-ai/dsh-storage-domain` 的 peer 范围能通过当前安装版本的兼容性检查（`includePrerelease`；未调用完整 `evaluatePluginCompatibility`） |

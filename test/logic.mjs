@@ -354,13 +354,25 @@ await checkAsync('applyPreset yields to an explicitly requested non-default pres
 
 // ---------------------------------------------------------------- applyModel
 
-await checkAsync('applyModel validates, dedupes, and degrades', async () => {
-  const makeAgent = (current) => {
+await checkAsync('applyModel validates, pins, and degrades', async () => {
+  // The fake select mirrors the real contract: it dedupes against the
+  // RECORDED selection only, and appends unconditionally when none exists.
+  const makeAgent = (options) => {
     const selected = []
+    let recorded
     return {
       selected,
       session: session({ cwd: OTHER }),
-      model: { current: () => current, select: (selection) => selected.push(selection) },
+      model: {
+        current: () => recorded ?? options,
+        select: (selection) => {
+          if (recorded !== undefined && recorded.provider === selection.provider
+            && recorded.model === selection.model
+            && (recorded.reasoningEffort ?? undefined) === (selection.reasoningEffort ?? undefined)) return
+          recorded = { ...selection }
+          selected.push(selection)
+        },
+      },
     }
   }
   let resolved = 0
@@ -368,10 +380,20 @@ await checkAsync('applyModel validates, dedupes, and degrades', async () => {
     services: { agents: blankAgents, llm: { resolveCallConfig: async () => { resolved += 1; return {} } } },
   })
 
-  const same = makeAgent({ provider: 'p', model: 'm', reasoningEffort: 'high' })
-  await self.applyModel(same, { provider: 'p', model: 'm', reasoningEffort: 'high' })
-  assert.equal(same.selected.length, 0, 'an equal selection is not rewritten')
-  assert.equal(resolved, 0, 'an equal selection is not validated')
+  // Memory equal to the live default, no recorded selection: the write must
+  // still happen so the blank session is pinned against later default drift
+  // (including across a live reuse, which never touches the model).
+  const pinned = makeAgent({ provider: 'p', model: 'm', reasoningEffort: 'high' })
+  await self.applyModel(pinned, { provider: 'p', model: 'm', reasoningEffort: 'high' })
+  assert.deepEqual(pinned.selected, [{ provider: 'p', model: 'm', reasoningEffort: 'high' }],
+    'a selection equal to the live default is still recorded once')
+  assert.equal(resolved, 1, 'the pinning write is validated')
+
+  // Re-applying to the same agent (cold resume) hits the recorded-value
+  // dedupe inside select: no second event, though validation runs again.
+  await self.applyModel(pinned, { provider: 'p', model: 'm', reasoningEffort: 'high' })
+  assert.equal(pinned.selected.length, 1, 'an equal recorded selection is not rewritten')
+  assert.equal(resolved, 2, 'validation is not skipped by the dedupe')
 
   const different = makeAgent({ provider: 'p', model: 'm' })
   await self.applyModel(different, { provider: 'q', model: 'n', reasoningEffort: 'low' })

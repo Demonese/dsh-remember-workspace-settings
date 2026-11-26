@@ -98,8 +98,8 @@
 - **记录实际值，包括默认值。** 默认 preset 和跟随全局默认的模型都是新对话实际使用的值，照常写入。这样工作区会“钉住”当次首条消息的选择；Settings 里改默认 preset/模型不会影响已经有记忆的工作区。
 - **`undefined` 表示未知或“无显式 effort”。** 首条消息时如果读不到 preset/model（例如没有 preset roster、agent 不可用），只跳过对应的一半，不用 `undefined` 去清掉旧记录；如果读到了 model 但 `reasoningEffort` 缺失，表示回到适配器默认，写入时清掉旧 effort。`writeRecord` 仍保留“显式 undefined 删除字段”的内部语义。
 - **显式预设让位（仅限非默认）。** 创建请求显式点名了非默认 preset（Creator 等流程）时，`applyPreset` 不覆盖；显式点名默认 preset 与按默认创建在 header/projection 上不可区分，仍会被记忆覆盖；运行时没有记录 preset 的会话会接受记忆值。该会话首条消息会把实际运行的 preset 记回工作区。
-- **模型先比当前选择，再解析调用配置，最后写。** 相同选择直接跳过（连校验也不做）；不同选择才通过 `llm.resolveCallConfig(target)` 验证 provider 有已注册 adapter、模型信息可解析、显式 reasoning effort 被支持；它不检查登录凭证或目录可选性（`session/selectModel` 才额外做 `requireModel` / `modelAvailable`）。失败只跳过模型这一半并 warn。
-- **不写重复事件。** 应用前先比 `agent.model.current()`；记录时比较除 `updatedAt` 外的字段。注意 `agent.model.select` 只和已记录值比较，没有记录时会无条件 append，所以应用侧的去重必须自己做。
+- **模型先解析调用配置，再无条件写入。** 通过 `llm.resolveCallConfig(target)` 验证 provider 有已注册 adapter、模型信息可解析、显式 reasoning effort 被支持；它不检查登录凭证或目录可选性（`session/selectModel` 才额外做 `requireModel` / `modelAvailable`）。校验通过后一律调用 `agent.model.select(target)`：它自身只与**已记录值**去重，相等时 no-op；没有记录时即使等于当前全局默认也写入一条“钉住”事件，使空白会话不再跟随后续全局默认变化，live 复用时模型也不会丢失。失败只跳过模型这一半并 warn。
+- **不写重复事件。** 应用侧的去重交给 `agent.model.select` 自身对已记录值的比较（相等即 no-op）；没有记录时写入的那一条事件是刻意的“钉住”，不是重复事件。记录侧比较除 `updatedAt` 外的字段，未变化不写。
 - **绝不改全局默认。** 只调用 `agent.model.select()`；`session/selectModel` 会顺手 `agentDefaultModel.saveSelection`，禁止使用。
 - **绝不外抛。** `agent/created` 的监听器抛错会让整个会话创建失败，所以应用逻辑整段捕获；`session/event` 的记录逻辑同样捕获，坏记录不能影响正在进行的对话。
 - **跳过子代理与 fork。** 子代理的模型策略不应污染工作区记忆；fork 默认跳过（`skipForks` 可关）。
@@ -115,7 +115,7 @@
 | fork 会话 | 默认跳过；`skipForks: false` 时参与 | `header.isSeeded === true`（现代 fork）或 `parentSession` |
 | 打开有历史的会话 | 不应用 | 仅当 `openTurnStartSeq === null && lastTurn === 0`（空白）时应用；有历史时该条件为假 |
 | 复用已落盘的空白会话（冷恢复） | 按 §4 规则重新应用记忆（显式非默认请求除外）；重复应用同一值 → 无副作用 | `agents.resume` → `agent/created`；`presets.select` 与 `model.select` 的相等判定 |
-| 复用进程内仍存活的空白会话（live） | Host 直接 `presets.select` 到请求/默认值，不触发 `agent/created`；插件不重新应用记忆。该会话首条消息会把 Host 当时的实际 preset/model 记回工作区，可能覆盖原偏好 | `reuseLive()`；见探索笔记 §1/§2 |
+| 复用进程内仍存活的空白会话（live） | Host 直接 `presets.select` 到请求/默认值，不触发 `agent/created`；插件不重新应用预设。该会话首条消息会把 Host 当时的 preset 记回工作区，可能覆盖原预设偏好；模型在创建时已钉住，复用不改它，首条消息记回同值 | `reuseLive()` 只切预设、不碰模型；见探索笔记 §1/§2 |
 | 记忆里的 preset 被删/改名 | 保留当前预设，warn | `select` 抛 `agent-preset/not-found` / `invalid` |
 | 模型没有 adapter / 元信息不可用 / effort 不支持 | 只跳过模型，preset 照常 | `resolveCallConfig` 抛错 |
 | provider 未登录 / 模型不在目录中 | 不保证拦截；可能先应用，真实请求时才失败 | 这里只调 `resolveCallConfig`，不做 `requireModel` / `modelAvailable` |
@@ -135,8 +135,8 @@
 - **会多一次组合挂载。** 当记忆里确实有 preset、且与 Host 当前目标不同时，按默认预设冷恢复一个已有空白会话会先用默认预设组装它，插件随后切到记忆值，因此比不用插件多一次预设重挂载（空白会话上成本很小）。这是 Host 创建路径决定的，Host-only 方案绕不开。live 复用不触发 `agent/created`，不会发生这次插件侧重挂载；没有 preset 记忆或值相同时也不会有额外重挂载。
 - **首条消息时记录实际 preset，包括默认 preset。** 空白会话里选好模式但没发消息，不会被记住；首条消息之后再改 preset/model 也不会重写工作区记忆。工作区因此会“钉住”其最近一次新对话首条消息使用的值；Settings 改全局默认不会再影响已有记忆的工作区，想跟随新默认需删除该工作区记录或用新默认重发一条首条消息。
 - **模型没有“创建时参数”。** 应用时机是会话刚创建、尚未开始。正常客户端等待 `session/create` 响应后才发第一条消息，此时新建/冷恢复路径的应用已经完成；live 复用不派发 `agent/created`，插件不会重新应用。只有绕过创建响应、在创建尚未 resolve 时直接用同一 sessionId 发消息的流程才理论上有窗口。
-- **GUI 的模型选择会改全局默认。** 这是 `session/selectModel` 的行为；插件自身不改。工作区记忆在首条消息时已经记下实际模型（包括当时跟随的全局默认），所以下一次新建/冷恢复会应用记忆；已有记忆的工作区不再被其他工作区换模型影响。没有记忆的工作区（还没发过首条消息）仍跟随全局默认。
-- **live 复用可能覆盖记忆。** Host 在 `reuseLive()` 里可能先把 blank 会话的 preset 切到请求/默认值；插件不会重新应用记忆，该会话首条消息会把 Host 当时的值记回工作区。也就是说，打开一个未发消息的空白会话后如果 Host 重置了 preset，再发首条消息会把原工作区偏好覆盖。这个路径没有 `agent/created`，Host-only 方案无法可靠区分“Host 重置”和“用户主动选择”。
+- **GUI 的模型选择会改全局默认。** 这是 `session/selectModel` 的行为；插件自身不改。工作区记忆在首条消息时已经记下实际模型（包括当时跟随的全局默认），下一次新建/冷恢复会应用并钉住它——即使记忆值等于当时的全局默认，也会写入一条 `model/selection`。所以已有记忆的工作区不再被其他工作区换模型影响，包括已经打开的空白会话。没有记忆的工作区（还没发过首条消息）仍跟随全局默认。
+- **live 复用可能覆盖预设记忆。** Host 在 `reuseLive()` 里可能先把 blank 会话的 preset 切到请求/默认值；插件不会重新应用预设，该会话首条消息会把 Host 当时的 preset 记回工作区。也就是说，打开一个未发消息的空白会话后如果 Host 重置了 preset，再发首条消息会把原工作区预设偏好覆盖（仅当记忆预设与请求/默认预设不同时才会发生）。模型在创建时已钉住，`reuseLive()` 不碰模型选择，因此模型记忆不会在这条路径被覆盖。这个路径没有 `agent/created`，Host-only 方案无法可靠区分“Host 重置”和“用户主动选择”。
 - **没有设置页。** 查看/清除记忆需要直接编辑存储 JSON（见[数据位置与重置](install-and-config.md#4-数据位置与重置)）；清除后该工作区回到全局默认。
 - **Creator 的连带效果。** 在某个工作区用 Creator（`cordis`）新对话并发首条消息后，该工作区下次新建或冷恢复的空白会话也会是 Creator 模式——这是“最近一次新对话首条消息”的语义；要切回，用目标 preset 新建对话并发首条消息，而不是在旧会话里改。若该空白仍是 live 会话并被再次复用，Host 可能先切到请求/默认预设，首条消息会把该值记回。
 

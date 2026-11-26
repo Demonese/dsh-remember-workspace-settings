@@ -63,9 +63,9 @@ appendUnstoredSuffix → sessions.enter → sessions.announce → setup(agentCtx
 1. **触发时 agent 已在 registry 里。** `agents.turnBoundaryOf()`、`agentPresets.select(agent, …)` 都可以用。
 2. **监听器是 serial 且被 await。** 新建/冷恢复路径的写入发生在创建 promise resolve 之前；正常客户端拿到 `session/create` 响应时值已改好，随后发送的首条 prompt 不会抢跑。插件仍不能假定所有调用方都等待响应。
 3. **监听器抛错会让整个会话创建失败。** 插件的应用逻辑必须整段 try/catch，绝不外抛。
-4. **live 复用不会触发 `agent/created`。** 当 `ctx.agents.get(sessionId)` 命中且仍空白时，`session/create` 走 `reuseLive()`，直接返回 live agent（或先 `presets.select()` 到请求/默认预设），不会 `agents.create()` / `agents.resume()`。插件只在 `agent/created` 应用，因此这条路径不会重新应用记忆；Host 的 `presets.select` 还可能把 preset 设成请求/默认预设，该会话首条消息会把 Host 当时的实际值记回工作区，可能覆盖原偏好。
+4. **live 复用不会触发 `agent/created`。** 当 `ctx.agents.get(sessionId)` 命中且仍空白时，`session/create` 走 `reuseLive()`，直接返回 live agent（或先 `presets.select()` 到请求/默认预设），不会 `agents.create()` / `agents.resume()`。插件只在 `agent/created` 应用，因此这条路径不会重新应用预设；Host 的 `presets.select` 还可能把 preset 设成请求/默认预设，该会话首条消息会把 Host 当时的 preset 记回工作区，可能覆盖原预设偏好。`reuseLive()` 不碰模型选择，而插件在创建时已把模型钉住，因此模型记忆不会在这条路径被覆盖。
 
-所以“下一个空白会话”必须限定为“下一次新建或冷恢复的空白会话”；live 复用的 preset 由 Host 直接处理，插件无法覆盖，但该会话首条消息会把 Host 当时的实际值记回工作区。其他事件要么 agent 还不存在，要么已经可能有 turn。
+所以“下一个空白会话”必须限定为“下一次新建或冷恢复的空白会话”；live 复用的 preset 由 Host 直接处理，插件无法覆盖，但该会话首条消息会把 Host 当时的 preset 记回工作区（模型已钉住，不受影响）。其他事件要么 agent 还不存在，要么已经可能有 turn。
 
 ## 3. `agentPresets.select()` 只能用于空白会话
 
@@ -100,12 +100,12 @@ select(selection: Readonly<ModelSelection>): void {
 
 两个细节：
 
-- 它只和**已记录值**比较；没有记录时会无条件 append，哪怕选择等于当前 options。所以插件在应用前先比 `agent.model.current()`，避免多余事件。
+- 它只和**已记录值**比较；没有记录时会无条件 append，哪怕选择等于当前 options。插件正是利用这一点：校验后无条件调用，没有记录时写入一条“钉住”事件，把空白会话的模型固定下来；已有记录且相等时由 select 自身 no-op。
 - `session/selectModel` 在记录会话选择之后，还会后台调用 `agentDefaultModel.saveSelection(selected)`（`dsh-api-session-controller/src/commands.ts:166-184`）。**禁止**用这个入口应用记忆，否则会把部署全局默认改掉。
 
 还有一层校验差异：`session/selectModel` 在 `resolveCallConfig` 之前调用 `requireModel` → `modelAvailable`，按当前 provider catalog 判断模型是否可选（`commands.ts:166-184`、`:415-420`、`catalog.ts:81-91`）。插件没有走这个 remote，只调用 `resolveCallConfig`，所以不检查登录凭证，也不做同等的目录可选性检查；失败只跳过模型这一半。
 
-GUI 的模型选择器走 `session/selectModel`，因此它本身会更新全局默认——那是 DSH 的行为，不是这个插件做的。插件应用记忆时只调用 `agent.model.select()`；如果记忆值等于当前选择，就不写事件。记录侧不再依赖 `model/selection`，而是在首条消息的 `turn/start` 读取 `agent.model.current()`，所以“用户没有点过模型选择器、一直跟随全局默认”的工作区也能被记录。
+GUI 的模型选择器走 `session/selectModel`，因此它本身会更新全局默认——那是 DSH 的行为，不是这个插件做的。插件应用记忆时只调用 `agent.model.select()`：校验后无条件写入，去重由 select 自身对已记录值的比较完成；没有记录时即使等于 live options（全局默认）也写入一条“钉住”事件，使空白会话不随后续全局默认变化漂移，live 复用时模型也不会丢失。记录侧不再依赖 `model/selection`，而是在首条消息的 `turn/start` 读取 `agent.model.current()`，所以“用户没有点过模型选择器、一直跟随全局默认”的工作区也能被记录。
 
 ## 5. 记录首条消息用 `turn/start`，不用 `agent-preset/selected` 或 `model/selection`
 
@@ -134,7 +134,7 @@ GUI 的模型选择器走 `session/selectModel`，因此它本身会更新全局
 - 工作区因此会钉住自己的 preset；Settings 改默认不会影响已有记忆的工作区；
 - 想跟随新默认，删除该工作区记录，或用新默认重发一条首条消息。
 
-这是产品语义，不是 DSH 的强制行为，依赖 `presetForSession()` 的稳定语义。注意 live 复用会让 Host 把 preset 设成请求/默认预设；插件不会重新应用记忆，该会话首条消息会把 Host 当时的实际值记回工作区（见 §2 事实 4）。
+这是产品语义，不是 DSH 的强制行为，依赖 `presetForSession()` 的稳定语义。注意 live 复用会让 Host 把 preset 设成请求/默认预设；插件不会重新应用预设，该会话首条消息会把 Host 当时的 preset 记回工作区（见 §2 事实 4）；模型在创建时已钉住，不受影响。
 
 ## 7. fork 与子代理判定
 

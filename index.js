@@ -19,6 +19,12 @@
  * `agentPresets.select()` is the same call the GUI makes for a new blank
  * session, and `agent.model.select()` is the low-level write that does NOT
  * touch the deployment-wide `agent-default-model` (unlike `session/selectModel`).
+ * The model write is unconditional after validation: with no recorded
+ * selection it appends one pinning event even when the memory equals the
+ * live deployment default, so the blank session stops following later
+ * default changes and keeps its model across a live reuse (that path never
+ * touches the model). `select()` itself no-ops against an equal recorded
+ * selection, so re-applying to a cold-resumed blank session writes nothing.
  *
  * @module dsh-remember-workspace-settings
  */
@@ -254,8 +260,14 @@ export default class RememberWorkspaceSettings extends Service {
 
   /**
    * Apply the remembered model selection to the blank session. Validation
-   * happens first: a provider that is signed out or a model that left the
-   * catalog leaves the deployment default in place instead of failing a turn.
+   * happens first: a model whose adapter or metadata is unavailable leaves
+   * the current selection in place instead of failing a turn. The write is
+   * then unconditional: `select()` no-ops against an equal recorded
+   * selection, but with no record it appends one pinning event even when the
+   * memory equals the live deployment default. Pinning keeps the blank
+   * session on the workspace's model when the deployment default changes
+   * elsewhere, and survives a live reuse (the Host never touches the model
+   * on that path).
    * @param {any} agent - blank agent.
    * @param {any} memory - workspace record.
    */
@@ -266,7 +278,6 @@ export default class RememberWorkspaceSettings extends Service {
     /** @type {{ provider: string, model: string, reasoningEffort?: string }} */
     const target = { provider: memory.provider, model: memory.model }
     if (memory.reasoningEffort !== undefined) target.reasoningEffort = memory.reasoningEffort
-    if (sameSelection(agent.model.current(), target)) return
     try {
       await llm.resolveCallConfig(target)
       agent.model.select(target)
@@ -333,17 +344,6 @@ function workspaceKey(cwd) {
 function sameMemory(a, b) {
   if (a.path !== b.path) return false
   return REMEMBERED_FIELDS.every(field => a[field] === b[field])
-}
-
-/**
- * Compare a complete selection.
- * @param {any} a - current selection, possibly undefined.
- * @param {any} b - target selection.
- * @returns {boolean} true when both name the same provider, model, and effort.
- */
-function sameSelection(a, b) {
-  return a !== undefined && a.provider === b.provider && a.model === b.model
-    && (a.reasoningEffort ?? undefined) === (b.reasoningEffort ?? undefined)
 }
 
 /** @param {unknown} error */
