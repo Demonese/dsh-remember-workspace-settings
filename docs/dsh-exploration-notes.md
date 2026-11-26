@@ -1,10 +1,18 @@
-# DSH 探索笔记
+# DeepSeek Harness 探索笔记
 
-本文件记录 `dsh-remember-workspace-settings` 依赖的 DeepSeek Harness（DSH）平台行为。这些结论来自 DSH 源码，而不是插件代码或公开文档，是插件设计成立的前提；修改插件或升级 DSH 时先读这里。
+> DeepSeek Harness 版本：0.2.2-rc.5
 
-> 版本基线：DSH **0.2.2-rc.5**（源码复核基线：release merge `9c2670d`）。源码核对以 source checkout 的 `packages/<group>/<package>/src` 为准；安装树中的 `@deepseek-ai/<package>/src` 只是同版本副本，不作为核对依据。正文与证据索引里的包名简写（如 `dsh-api-session-controller/src/...`）对应 source checkout 的 `packages/<group>/<package>/src/...`，行号只对该版本有效。升级 DSH 后按 §10 复核，不要直接沿用结论。
->
-> 相关文档：[设计说明](design.md) · [测试与发布](test.md) · [项目介绍](../README.md)
+该文档记录该插件依赖的 DeepSeek Harness（以下简称 DSH）平台行为，结论来自 DSH 源码，是插件设计成立的前提。修改插件或升级 DSH 时先读这里。
+
+## DSH 源代码仓库和发行版包
+
+源码核对以源代码仓库下的 `packages/<group>/<package>/src` 为准。
+
+安装树中的 `@deepseek-ai/<package>/src` 是同版本副本，仅供参考，不作为核对依据。
+
+正文与证据索引里的包名简写（如 `dsh-api-session-controller/src/...`）对应源代码仓库下的 `packages/<group>/<package>/src/...`，行号只对该版本有效。
+
+升级 DSH 后需要按 §10 复核。
 
 ## 1. 创建会话没有模型参数
 
