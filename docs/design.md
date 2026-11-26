@@ -239,7 +239,7 @@ $DSH_HOME/storages/workspace_launch_defaults.json
 | `icon.svg` | 36×36 图标（文件夹 + 时钟，无文字） |
 | `README.md` | 面向用户的基本功能介绍与文档入口 |
 | `AGENTS.md` | 维护者/agent 会话的文档索引 |
-| `docs/DESIGN.md` | 设计依据、行为边界、安装配置与开发约定 |
+| `docs/design.md` | 设计依据、行为边界、安装配置与开发约定 |
 | `docs/test.md` | 测试原理、验证步骤与发布检查 |
 | `docs/dsh-exploration-notes.md` | DSH 平台机制、源码证据与升级复核清单 |
 | `test/logic.mjs` | 可复跑的逻辑单测（不需要把插件装进 profile） |

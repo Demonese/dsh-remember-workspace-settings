@@ -8,6 +8,6 @@
 
 ## 文档
 
-- [设计说明](docs/DESIGN.md)：设计依据、行为边界、安装与配置、数据位置、代码地图与开发约定
+- [设计说明](docs/design.md)：设计依据、行为边界、安装与配置、数据位置、代码地图与开发约定
 - [测试与发布](docs/test.md)：测试原理、运行方式、修改后的验证与发布前检查
 - [DeepSeek Harness 探索笔记](docs/dsh-exploration-notes.md)：源码核实过的 DSH 平台机制、版本基线与升级复核清单

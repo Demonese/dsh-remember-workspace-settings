@@ -4,7 +4,7 @@
 
 > 版本基线：DSH **0.2.2-rc.5**（源码复核基线：release merge `9c2670d`）。源码核对以 source checkout 的 `packages/<group>/<package>/src` 为准；安装树中的 `@deepseek-ai/<package>/src` 只是同版本副本，不作为核对依据。正文与证据索引里的包名简写（如 `dsh-api-session-controller/src/...`）对应 source checkout 的 `packages/<group>/<package>/src/...`，行号只对该版本有效。升级 DSH 后按 §10 复核，不要直接沿用结论。
 >
-> 相关文档：[设计说明](DESIGN.md) · [测试与发布](test.md) · [项目介绍](../README.md)
+> 相关文档：[设计说明](design.md) · [测试与发布](test.md) · [项目介绍](../README.md)
 
 ## 1. 创建会话没有模型参数
 

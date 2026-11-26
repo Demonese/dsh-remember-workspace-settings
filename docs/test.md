@@ -4,7 +4,7 @@
 
 > 版本基线：DSH **0.2.2-rc.5**。单测会从指定的 DSH 安装树解析平台包，并检查 `@deepseek-ai/dsh-storage-domain` 的 peer 范围能通过该版本的兼容性检查（这是简化检查，不是完整的插件兼容性闸门）；升级 DSH 后的复核见 [DSH 探索笔记](dsh-exploration-notes.md) 第 10 节。
 >
-> 相关文档：[项目介绍](../README.md) · [设计说明](DESIGN.md) · [DSH 探索笔记](dsh-exploration-notes.md)
+> 相关文档：[项目介绍](../README.md) · [设计说明](design.md) · [DSH 探索笔记](dsh-exploration-notes.md)
 
 ## 1. 测试策略
 
@@ -17,7 +17,7 @@
 
 因此它能在未安装状态下验证首条消息记录、合并与删除、默认值记录、非默认显式预设让位、模型校验与端到端应用，也能检查 bundle 清单的基本不变量。
 
-它**不替代**真实 Host 集成测试：不启动 DSH，不验证真实 linked layer 加载、`agent/created` / live 复用的时序、存储落盘或 GUI 行为。完整的“首条消息 → 新建会话 → 检查预设/模型”验收步骤见 [设计说明 §6.2](DESIGN.md#62-用法与验证)。
+它**不替代**真实 Host 集成测试：不启动 DSH，不验证真实 linked layer 加载、`agent/created` / live 复用的时序、存储落盘或 GUI 行为。完整的“首条消息 → 新建会话 → 检查预设/模型”验收步骤见 [设计说明 §6.2](design.md#62-用法与验证)。
 
 ## 2. 运行测试
 
@@ -99,7 +99,7 @@ Node 22.15+ 是硬要求：`registerHooks` 是静态命名导入，低版本 Nod
 - 真实 provider 的登录状态与模型目录（`resolveCallConfig` 被 mock）；
 - Web GUI 的模型选择器及其对全局默认的副作用。
 
-这些需要按 [设计说明 §6.2](DESIGN.md#62-用法与验证) 做手工验收，或在真实 Host 上做集成测试。
+这些需要按 [设计说明 §6.2](design.md#62-用法与验证) 做手工验收，或在真实 Host 上做集成测试。
 
 ## 4. 修改后必须执行的验证
 
@@ -127,15 +127,15 @@ node test/logic.mjs
 
 | 改动 | 需要同步 |
 |---|---|
-| `Config` 字段或默认值 | `test/logic.mjs` 的 Config 检查、[设计说明 §6.3](DESIGN.md#63-配置)、locale 文案 |
-| 事件监听或应用逻辑 | 对应的 remember/apply 检查、[设计说明 §4](DESIGN.md) |
-| `package.json` 的 bundle/peer | 打包清单检查、[设计说明 §7](DESIGN.md) |
+| `Config` 字段或默认值 | `test/logic.mjs` 的 Config 检查、[设计说明 §6.3](design.md#63-配置)、locale 文案 |
+| 事件监听或应用逻辑 | 对应的 remember/apply 检查、[设计说明 §4](design.md) |
+| `package.json` 的 bundle/peer | 打包清单检查、[设计说明 §7](design.md) |
 | 测试命令或退出码 | 本文第 2 节 |
-| 行为边界 | [设计说明 §5](DESIGN.md)、README 功能描述、locale 文案 |
+| 行为边界 | [设计说明 §5](design.md)、README 功能描述、locale 文案 |
 
 ## 5. 发布前检查
 
-- README 的功能介绍与当前实现一致；[设计说明](DESIGN.md) 的安装、配置、数据位置与当前代码一致。
+- README 的功能介绍与当前实现一致；[设计说明](design.md) 的安装、配置、数据位置与当前代码一致。
 - 本文的命令、退出码与覆盖范围与 `test/logic.mjs` 一致。
 - `locale/{en,zh}.json` 只描述已实现、已验证的行为。
 - `package.json` 的 `files` 覆盖运行所需文件；用 `npm pack --dry-run` 检查实际打包清单。
