@@ -1,11 +1,12 @@
 # 设计说明
 
-本文说明 `dsh-remember-workspace-settings` 为什么这样实现：DSH 的哪些机制决定了插件的形状、最终设计如何落地、哪些边界情况是刻意处理的，以及安装、配置与数据位置。目标读者是想修改行为、移植到新 DSH 版本或审查设计的维护者。
+本文说明 `dsh-remember-workspace-settings` 为什么这样实现：DSH 的哪些机制决定了插件的形状、最终设计如何落地、哪些边界情况是刻意处理的，以及代码地图与开发约定。安装、配置与数据位置见 [安装、配置与数据](install-and-config.md)。目标读者是想修改行为、移植到新 DSH 版本或审查设计的维护者。
 
 | 文档 | 内容 |
 |---|---|
 | [项目介绍](../README.md) | 基本功能介绍与文档入口 |
-| **设计说明**（本文） | 设计依据、行为边界、安装配置、代码地图与开发约定 |
+| [安装、配置与数据](install-and-config.md) | 安装步骤、用法验证、配置项、数据位置与重置 |
+| **设计说明**（本文） | 设计依据、行为边界、代码地图与开发约定 |
 | [测试与发布](test.md) | 测试原理、运行方式、修改后的验证与发布检查 |
 | [DSH 探索笔记](dsh-exploration-notes.md) | 源码核实过的 DSH 平台机制、版本基线与升级复核清单 |
 
@@ -136,99 +137,18 @@
 - **模型没有“创建时参数”。** 应用时机是会话刚创建、尚未开始。正常客户端等待 `session/create` 响应后才发第一条消息，此时新建/冷恢复路径的应用已经完成；live 复用不派发 `agent/created`，插件不会重新应用。只有绕过创建响应、在创建尚未 resolve 时直接用同一 sessionId 发消息的流程才理论上有窗口。
 - **GUI 的模型选择会改全局默认。** 这是 `session/selectModel` 的行为；插件自身不改。工作区记忆在首条消息时已经记下实际模型（包括当时跟随的全局默认），所以下一次新建/冷恢复会应用记忆；已有记忆的工作区不再被其他工作区换模型影响。没有记忆的工作区（还没发过首条消息）仍跟随全局默认。
 - **live 复用可能覆盖记忆。** Host 在 `reuseLive()` 里可能先把 blank 会话的 preset 切到请求/默认值；插件不会重新应用记忆，该会话首条消息会把 Host 当时的值记回工作区。也就是说，打开一个未发消息的空白会话后如果 Host 重置了 preset，再发首条消息会把原工作区偏好覆盖。这个路径没有 `agent/created`，Host-only 方案无法可靠区分“Host 重置”和“用户主动选择”。
-- **没有设置页。** 查看/清除记忆需要直接编辑存储 JSON；清除后该工作区回到全局默认。
+- **没有设置页。** 查看/清除记忆需要直接编辑存储 JSON（见[数据位置与重置](install-and-config.md#4-数据位置与重置)）；清除后该工作区回到全局默认。
 - **Creator 的连带效果。** 在某个工作区用 Creator（`cordis`）新对话并发首条消息后，该工作区下次新建或冷恢复的空白会话也会是 Creator 模式——这是“最近一次新对话首条消息”的语义；要切回，用目标 preset 新建对话并发首条消息，而不是在旧会话里改。若该空白仍是 live 会话并被再次复用，Host 可能先切到请求/默认预设，首条消息会把该值记回。
 
-## 6. 安装、配置与数据
-
-### 6.1 安装
-
-需要一台安装了 DSH 的机器，以及提供 `storageDomain` Service 的 DSH 版本（开发时使用 0.2.2-rc.5；peer 要求 `@deepseek-ai/dsh-storage-domain >= 0.2.0`）。
-
-1. 克隆或下载本仓库到任意目录。
-2. 在 DSH Web GUI 打开 **Plugins** 页，选择 **Add plugin**，指向本仓库目录；或者让 agent 调用 `plugin_manager` 的 `install_bundle`，`target` 填本目录的绝对路径。
-3. 安装后新建会话即可生效；已经打开的会话不会被改动。
-
-这是一个 Host-only bundle：没有 client 半、没有构建步骤，也不需要先安装依赖。首次安装通常无需重启；升级时用同一入口安装更新后的目录，若 Plugins 页提示需要重启，按提示操作。卸载在 Plugins 页移除 bundle，已保存的记忆不会自动删除。
-
-### 6.2 用法与验证
-
-装好即生效，不需要任何界面操作：新建对话时选好模式/模型，再发送第一条消息；插件记录的是这条消息实际使用的值。想让它消失，停用插件即可（已保存的值会保留）。
-
-验证方法：
-
-1. 在 A 工作区新建会话，选好模式 P、模型 X（P/X 是默认值也可以），**发送第一条消息**；插件记录的是这条消息实际使用的值；
-2. 在 A 工作区再新建会话 → 应直接是 P + X，即使 Settings 里的默认值已经改过；
-3. 切到 B 工作区新建会话 → 应仍是 B 自己的记忆；B 从未发过首条消息时使用全局默认。
-
-从旧版本升级时存储结构不变，旧记录继续有效。旧版本没有记录默认 preset 的工作区，会在下一次新对话首条消息时补记实际 preset；从未记录过模型的工作区，会在同一时刻记录当时的全局默认模型。若这个全局默认已经被其他工作区改过，需要在该工作区重新选一次模型。
-
-### 6.3 配置
-
-在 **Plugins** 页找到 `remember-workspace-settings` 行，或直接编辑 profile 的 `cordis.patch.yml` 里该行的 `config`：
-
-| 字段 | 默认 | 作用 |
-|---|---|---|
-| `enabled` | `true` | 总开关；关闭后既不记录也不应用 |
-| `applyPreset` | `true` | 是否把记忆的预设应用到新建/冷恢复的空白会话 |
-| `applyModel` | `true` | 是否把记忆的模型/推理强度应用到新建/冷恢复的空白会话 |
-| `rememberPreset` | `true` | 是否在新建会话首条消息时记录实际 preset（包括默认 preset） |
-| `rememberModel` | `true` | 是否在新建会话首条消息时记录实际 provider/model/effort（包括跟随的全局默认） |
-| `skipForks` | `true` | fork 出来的会话不参与（既不应用也不记录） |
-| `verbose` | `false` | 每次应用/记录都写一条 info 日志（排查时打开） |
-
-示例：
-
-```yaml
-- insert:
-    - id: remember-workspace-settings
-      name: dsh-remember-workspace-settings
-      config:
-        verbose: true
-```
-
-### 6.4 数据位置与重置
-
-```text
-$DSH_HOME/storages/workspace_launch_defaults.json
-```
-
-`$DSH_HOME` 默认是 `~/.dsh`（Windows 上是 `%USERPROFILE%\.dsh`），可以用 `DSH_HOME` 环境变量覆盖。
-
-文件是 storage-json 的 single-unit 文档，记录挂在 `tables.workspaces` 下，一个工作目录一条：
-
-```json
-{
-  "unit": { "name": "workspace_launch_defaults", "version": 1 },
-  "global": null,
-  "tables": {
-    "workspaces": {
-      "/home/you/projects/demo": {
-        "path": "/home/you/projects/demo",
-        "agentPreset": "ptc",
-        "provider": "your-provider",
-        "model": "your-model",
-        "reasoningEffort": "high",
-        "updatedAt": 1764000000000
-      }
-    }
-  }
-}
-```
-
-存储键是规范化后的绝对工作目录：`path.resolve(cwd)`，Windows 上再转小写；记录里的 `path` 保留会话创建时的写法，便于阅读。`agentPreset` 是该工作区最近一次新对话首条消息实际使用的 preset，可能就是默认 preset；`provider / model / reasoningEffort` 是同一时刻实际生效的模型选择，跟随全局默认时也会写入。
-
-**重置某个工作区**：停掉 DSH，删除 `tables.workspaces` 里对应的键（或整个文件），再启动。文件损坏或版本不匹配时，插件会记录一条 warning 并以“无记忆”状态继续运行，不会阻塞 DSH 启动。
-
-## 7. 打包与加载
+## 6. 打包与加载
 
 这是一个 **Host-only bundle**：没有 client 半、没有构建步骤、没有安装脚本。`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 只 `insert` 一行。
 
 运行时包由 DSH 安装树提供：本插件的 4 个裸导入必须列在插件自己的 `peerDependencies` 里，`dependencies` 不得声明（空对象也会被测试拒绝）；否则 linked layer 可能解析不到，或装出第二份 cordis / zod。版本闸门与源码依据见 [DSH 探索笔记](dsh-exploration-notes.md) 第 9 节。
 
-## 8. 代码地图与开发约定
+## 7. 代码地图与开发约定
 
-### 8.1 文件职责
+### 7.1 文件职责
 
 | 文件 | 作用 |
 |---|---|
@@ -239,26 +159,27 @@ $DSH_HOME/storages/workspace_launch_defaults.json
 | `icon.svg` | 36×36 图标（文件夹 + 时钟，无文字） |
 | `README.md` | 面向用户的基本功能介绍与文档入口 |
 | `AGENTS.md` | 维护者/agent 会话的文档索引 |
-| `docs/design.md` | 设计依据、行为边界、安装配置与开发约定 |
+| `docs/design.md` | 设计依据、行为边界、代码地图与开发约定 |
+| `docs/install-and-config.md` | 安装步骤、用法验证、配置项、数据位置与重置 |
 | `docs/test.md` | 测试原理、验证步骤与发布检查 |
 | `docs/dsh-exploration-notes.md` | DSH 平台机制、源码证据与升级复核清单 |
 | `test/logic.mjs` | 可复跑的逻辑单测（不需要把插件装进 profile） |
 | `LICENSE` | MIT 许可证 |
 
-### 8.2 开发约定
+### 7.2 开发约定
 
 - 与用户交流、README、文档用中文；代码与注释用英文。
 - 不自行安装/卸载插件、不改 profile 的 `package.json` / `cordis.patch.yml`；这些由 `plugin_manager` 或用户操作。
 - 不向会话日志追加自定义事件类型（DSH 的硬规则）。
 - 不修改 storage domain 名 `workspace_launch_defaults`；它同时是磁盘 unit 名。
 - 改 `index.js` 后必须按 [测试与发布](test.md) 执行验证。
-- README 只保留基本功能介绍；设计、测试、DSH 机制分别落在对应文档，避免内容回流和重复。
+- README 只保留基本功能介绍；设计、安装配置、测试、DSH 机制分别落在对应文档，避免内容回流和重复。
 - 不把本机 profile、用户名、真实 provider/model 或绝对安装路径写进文档与测试默认值。
 - `locale/{en,zh}.json` 只描述已实现、已验证的行为。
 
-## 9. 升级与维护
+## 8. 升级与维护
 
 - 升级 DSH 后，先按 [DSH 探索笔记](dsh-exploration-notes.md) 第 10 节逐项复核，不要假设旧 API 语义仍然成立。
 - 运行 `node test/logic.mjs`；如果因 API 变化失败，先确认变化点，再决定改测试还是改插件。
-- 行为变化时同步更新本文件、[测试与发布](test.md)、README 的功能描述与 `locale` 文案。
-- 发布前按 [测试与发布](test.md) 的检查清单核对安装、配置、数据位置与打包内容。
+- 行为变化时同步更新本文件、[安装、配置与数据](install-and-config.md)、[测试与发布](test.md)、README 的功能描述与 `locale` 文案。
+- 发布前按 [测试与发布](test.md) 的检查清单核对[安装、配置与数据](install-and-config.md)与打包内容。
