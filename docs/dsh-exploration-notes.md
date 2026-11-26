@@ -2,7 +2,7 @@
 
 本文件记录 `dsh-remember-workspace-settings` 依赖的 DeepSeek Harness（DSH）平台行为。这些结论来自 DSH 源码，而不是插件代码或公开文档，是插件设计成立的前提；修改插件或升级 DSH 时先读这里。
 
-> 版本基线：DSH **0.2.2-rc.5**（源码复核基线：release merge `9c2670d`）。源码路径相对于 DSH 安装树中的 `@deepseek-ai/` 依赖包目录（通常为 `@deepseek-ai/dsh/node_modules/@deepseek-ai/`），行号只对该版本有效；同一版本的源码树位于 `packages/<group>/<package>/src`，与安装树 `src` 内容一致。升级 DSH 后按 §10 复核，不要直接沿用结论。
+> 版本基线：DSH **0.2.2-rc.5**（源码复核基线：release merge `9c2670d`）。源码核对以 source checkout 的 `packages/<group>/<package>/src` 为准；安装树中的 `@deepseek-ai/<package>/src` 只是同版本副本，不作为核对依据。正文与证据索引里的包名简写（如 `dsh-api-session-controller/src/...`）对应 source checkout 的 `packages/<group>/<package>/src/...`，行号只对该版本有效。升级 DSH 后按 §10 复核，不要直接沿用结论。
 >
 > 相关文档：[设计说明](DESIGN.md) · [测试与发布](test.md) · [项目介绍](../README.md)
 
@@ -40,7 +40,7 @@ await this.ctx.serial(entry.carrier, 'agent/created', {
 })
 ```
 
-创建顺序（`dsh-agent-loop/lib/index.js:1582-1611`，整段包在 `agent.runMaintenance()` 里）：
+创建顺序（`dsh-agent-loop/src/index.ts:622-642`，整段包在 `agent.runMaintenance()` 里）：
 
 ```text
 appendUnstoredSuffix → sessions.enter → sessions.announce → setup(agentCtx)
@@ -55,9 +55,9 @@ appendUnstoredSuffix → sessions.enter → sessions.announce → setup(agentCtx
 1. **触发时 agent 已在 registry 里。** `agents.turnBoundaryOf()`、`agentPresets.select(agent, …)` 都可以用。
 2. **监听器是 serial 且被 await。** 新建/冷恢复路径的写入发生在创建 promise resolve 之前；正常客户端拿到 `session/create` 响应时值已改好，随后发送的首条 prompt 不会抢跑。插件仍不能假定所有调用方都等待响应。
 3. **监听器抛错会让整个会话创建失败。** 插件的应用逻辑必须整段 try/catch，绝不外抛。
-4. **live 复用不会触发 `agent/created`。** 当 `ctx.agents.get(sessionId)` 命中且仍空白时，`session/create` 走 `reuseLive()`，直接返回 live agent（或先 `presets.select()` 到请求/默认预设），不会 `agents.create()` / `agents.resume()`。插件只在 `agent/created` 应用，因此这条路径不会重新应用记忆；Host 的 `presets.select` 还可能把 preset 设成请求/默认预设，如果结果是默认值，下一轮 `turn/start` 会把它当作默认值并清掉工作区偏好。
+4. **live 复用不会触发 `agent/created`。** 当 `ctx.agents.get(sessionId)` 命中且仍空白时，`session/create` 走 `reuseLive()`，直接返回 live agent（或先 `presets.select()` 到请求/默认预设），不会 `agents.create()` / `agents.resume()`。插件只在 `agent/created` 应用，因此这条路径不会重新应用记忆；Host 的 `presets.select` 还可能把 preset 设成请求/默认预设，该会话首条消息会把 Host 当时的实际值记回工作区，可能覆盖原偏好。
 
-所以“下一个空白会话”必须限定为“下一次新建或冷恢复的空白会话”；live 复用的 preset 由 Host 直接处理，插件无法覆盖。其他事件要么 agent 还不存在，要么已经可能有 turn。
+所以“下一个空白会话”必须限定为“下一次新建或冷恢复的空白会话”；live 复用的 preset 由 Host 直接处理，插件无法覆盖，但该会话首条消息会把 Host 当时的实际值记回工作区。其他事件要么 agent 还不存在，要么已经可能有 turn。
 
 ## 3. `agentPresets.select()` 只能用于空白会话
 
@@ -97,9 +97,9 @@ select(selection: Readonly<ModelSelection>): void {
 
 还有一层校验差异：`session/selectModel` 在 `resolveCallConfig` 之前调用 `requireModel` → `modelAvailable`，按当前 provider catalog 判断模型是否可选（`commands.ts:166-184`、`:415-420`、`catalog.ts:81-91`）。插件没有走这个 remote，只调用 `resolveCallConfig`，所以不检查登录凭证，也不做同等的目录可选性检查；失败只跳过模型这一半。
 
-GUI 的模型选择器走 `session/selectModel`，因此它本身会更新全局默认——那是 DSH 的行为，不是这个插件做的。由此还有一个验证上的推论：新会话初始模型恰好等于记忆值时，插件不写 `model/selection` 是正确行为；判断是否应用要看首轮 `request/header`。
+GUI 的模型选择器走 `session/selectModel`，因此它本身会更新全局默认——那是 DSH 的行为，不是这个插件做的。插件应用记忆时只调用 `agent.model.select()`；如果记忆值等于当前选择，就不写事件。记录侧不再依赖 `model/selection`，而是在首条消息的 `turn/start` 读取 `agent.model.current()`，所以“用户没有点过模型选择器、一直跟随全局默认”的工作区也能被记录。
 
-## 5. 记录 preset 用 `turn/start`，不用 `agent-preset/selected`
+## 5. 记录首条消息用 `turn/start`，不用 `agent-preset/selected` 或 `model/selection`
 
 冷恢复空白会话时，Host 的 `session/create` 会先用目标预设（未显式指定时就是配置默认预设）重新组装，并在需要时写一条 `agent-preset/selected`（`dsh-api-session-controller/src/agent.ts:404-414`）。live 复用则由 `reuseLive()` 直接 `select()` 到请求/默认预设（同文件 `:383-401`）；它不经过 `reuseSetup`/创建期 setup，目标不同时仍由 registry 的 `select` 执行 `recompose → mount`，只是不派发 `agent/created`。如果插件照 `agent-preset/selected` 事件记录：
 
@@ -107,19 +107,26 @@ GUI 的模型选择器走 `session/selectModel`，因此它本身会更新全局
 - live 复用会让 Host 把 preset 设成请求/默认预设；显式指定的非默认 preset 会被保留，插件仍没有应用机会；
 - 而且“Host 写入”和“插件应用”之间存在竞态。
 
-正确做法是在 `turn/start` 时读 `agentPresets.presetForSession(session)`，记录**这一轮实际跑的预设**。这样也自然满足“只记录真正用过的预设”的产品语义：只是点了模式但没发消息，不算。
+正确做法是在 `turn/start` 且 `turn === 1` 时读 `agentPresets.presetForSession(session)` 与 `agent.model.current()`，记录**首条消息实际使用的 preset 和模型**。这样：
 
-模型则监听 `model/selection`：这是用户每次选模型都会提交的完整选择，且模型切换不会像预设那样在创建时被 Host 重置。
+- 只是点选模式/模型但没发首条消息，不算；
+- 用户没有点过模型选择器、一直跟随全局默认时，也能记录 effective selection；
+- 旧会话里再改 preset/model 不会重写工作区记忆；
+- 不会把 Host 在冷恢复/live 复用时写入的 `agent-preset/selected` 误当成记录源。
 
-## 6. 默认预设 = 无偏好
+`agent.model.current()` 在没有会话记录时返回 live options（即全局默认），所以“首条消息时实际使用的模型”总能读到；`presetForSession()` 返回实际记录的 preset，包括默认 preset。
 
-`defaultId` 是当前配置默认预设。若某一轮 `turn/start` 时实际运行的就是 `defaultId`，插件把记录的 `agentPreset` 清掉，而不是写入该 id。
+## 6. 记录实际 preset（包括默认）
 
-原因：默认预设只是一个“当前配置”，会随 Settings 变化。把默认值钉进工作区记忆会让该工作区永远停在旧默认上；清掉字段后，它继续跟随以后的默认值。
+`defaultId` 是当前配置默认 preset；`presetForSession()` 返回会话实际记录的 preset（包括默认值和已从 roster 删除的历史值，`dsh-agent-preset-registry/src/index.ts:81-91`）。插件在首条消息时直接记录这个值，不再把默认值转成“无偏好”。
 
-这条是产品语义，不是 DSH 的强制行为，但依赖 `presets.defaultId` 与 `presetForSession()` 的稳定语义。
+原因：
 
-注意：live 复用会让 Host 把 preset 设成请求/默认预设（未显式指定时就是默认）；插件不会重新应用记忆，这条规则会在下一轮把工作区偏好清掉（见 §2 事实 4）。
+- 用户要求“新对话首条消息时把预设存下来”，默认 preset 也是当次实际使用的值；
+- 工作区因此会钉住自己的 preset；Settings 改默认不会影响已有记忆的工作区；
+- 想跟随新默认，删除该工作区记录，或用新默认重发一条首条消息。
+
+这是产品语义，不是 DSH 的强制行为，依赖 `presetForSession()` 的稳定语义。注意 live 复用会让 Host 把 preset 设成请求/默认预设；插件不会重新应用记忆，该会话首条消息会把 Host 当时的实际值记回工作区（见 §2 事实 4）。
 
 ## 7. fork 与子代理判定
 
@@ -148,14 +155,14 @@ const domainSpec = defineDomain({
 - **为什么用 cwd 而不是 `workspaceId`。** `session.header.cwd` 在创建会话时稳定且有值；删除 Workspace 注册项不应该丢掉记忆。
 - **打开失败要降级。** 文件损坏、domain 版本不匹配或后端不可用时，插件记录一条 warning 并以“无记忆”状态继续运行，不阻塞 DSH 启动。
 - **schema 校验发生在 open/读边界，不在 `put` 写入时。** `storage-domain` 在 `open` 的 `loadAll` 阶段按 zod schema 校验记录；默认（未声明 `invalidRecords`）下，一条 schema-invalid 记录会让整个 domain 打开失败，而不是只丢那一条。插件没有声明 `invalidRecords: 'backup-and-skip'`，所以坏记录会走上面的“无记忆”降级路径。
-- **读是内存中的同步读，写是持久化后再返回。** domain 自身有按域的写链；插件再包一层 `writeChain`，把同一 key 的“读-改-写”串行化，避免 preset 与 model 事件相邻到达时互相覆盖。
+- **读是内存中的同步读，写是持久化后再返回。** domain 自身有按域的写链；插件再包一层 `writeChain`，把同一 key 的“读-改-写”串行化，避免不同会话的首条消息几乎同时到达时互相覆盖。
 - 存储域是 Host 侧状态，不写会话日志、不进入模型上下文；插件通过 `ctx.effect()` 在插件卸载时 `domain.close()`。
 
 如果某个 profile 改掉了 storage-json 的路由或后端，上面的默认路径会随之变化；布局由 domain spec 决定（本插件未设置，默认 `single`），profile 不能改。域版本与兼容规则见 `@deepseek-ai/dsh-storage-domain` 的文档。
 
 ## 9. 打包与加载：四个裸导入必须列在 `peerDependencies`
 
-以本地目录安装时，Loader 走 **linked layer**。`routeLinked()` 从插件目录向上逐层读取祖先目录的 `package.json`，命中 `peerDependencies` 即把裸导入拦截到安装树；对本插件的裸导入，插件根 manifest 是最先生效的一份声明，祖先目录若也声明 peer 同样会参与拦截（`dsh-app-boot/lib/worker/profile-resolution-bootstrap.js:131-138`、`:460-514`）。
+以本地目录安装时，Loader 走 **linked layer**。`routeLinked()` 从插件目录向上逐层读取祖先目录的 `package.json`，命中 `peerDependencies` 即把裸导入拦截到安装树；对本插件的裸导入，插件根 manifest 是最先生效的一份声明，祖先目录若也声明 peer 同样会参与拦截（`dsh-app-boot/src/profile-resolution/resolver.ts:243`、`:636-647`）。
 
 因此：
 
@@ -169,16 +176,16 @@ const domainSpec = defineDomain({
 DSH 升级后，先复核以下机制，再改插件行为：
 
 1. `SessionCreateRequest` 是否仍然没有 model 字段（`dsh-api-session-controller/src/types.ts`）。
-2. `agent/created` 是否仍然 serial、被 await；新建/冷恢复是否派发、resume 是否也会派发、live 复用是否仍然不派发（`dsh-agent/src/index.ts`、`dsh-agent-loop/lib/index.js`、`dsh-api-session-controller/src/agent.ts`）。
+2. `agent/created` 是否仍然 serial、被 await；新建/冷恢复是否派发、resume 是否也会派发、live 复用是否仍然不派发（`dsh-agent/src/index.ts`、`dsh-agent-loop/src/index.ts`、`dsh-api-session-controller/src/agent.ts`）。
 3. `agentPresets.select()` 的空白判定、签名与默认值语义是否变化（`dsh-agent-preset-registry/src/index.ts`）。
 4. `agent.model.select()` 是否仍然只写会话日志、不改全局默认；`session/selectModel` 是否仍然会写全局默认（`dsh-agent/src/model-selection.ts`、`dsh-api-session-controller/src/commands.ts`）。
-5. `session/event` 是否仍然派发 `turn/start` 与 `model/selection`，事件数据字段是否变化。
+5. `session/event` 是否仍然派发 `turn/start`，新会话的 `turn` 是否从 1 开始，以及首轮时 `agent.model.current()` 是否已能返回实际 selection（插件不再依赖 `model/selection` 作为记录源）。
 6. `storageDomain.open()` / `domainTable()` 的 API、domain 版本与磁盘布局是否兼容。
 7. 版本闸门是否仍然 `engines.dsh` 优先且独占、未声明时才检查 dsh 系 peer、是否仍接受预发布版；linked layer 是否仍按祖先目录的 `peerDependencies` 拦截裸导入。
 8. 跑 `node test/logic.mjs`；如果它因 API 变化失败，先确认变化点，再决定改测试还是改插件。
 9. `reuseLive()` 是否仍然直接返回 live blank / 直接 `select()`，不派发 `agent/created`；如果 DSH 新增 live 复用事件，插件可以考虑在那里应用记忆。
 10. session header 的 `origin` / `isSeeded` / `parentSession` / `cwd` 字段与 fork/subagent 判定是否变化（`dsh-session` 的 header 类型）。
-11. `agentOptions()` 的 live getter、`agentDefaultModel.currentSelection()`、首轮 `request/header` 固定 selection 的语义是否变化（`dsh-api-session-controller/src/agent.ts`、`dsh-agent/src/model-selection.ts`）。
+11. `agent.model.current()` 的 live options、`agentDefaultModel.currentSelection()`、首轮 `request/header` 固定 selection 的语义是否变化（`dsh-api-session-controller/src/agent.ts`、`dsh-agent/src/model-selection.ts`）。
 12. `resolveCallConfig` 的校验边界（adapter 注册 / 模型信息 / 显式 effort；不查凭证与目录）是否变化（`dsh-llm/src/index.ts`）。
 13. storage-domain 的 schema 校验边界、`invalidRecords` 默认行为、single-unit 文件封装（`unit` / `global` / `tables`）是否变化（`dsh-storage-domain`、`dsh-storage-json`）。
 
@@ -196,7 +203,7 @@ DSH 升级后，先复核以下机制，再改插件行为：
 | `dsh-api-session-controller/src/commands.ts:415-420` | `requireModel` / `modelAvailable` 目录检查 |
 | `dsh-api-session-controller/src/catalog.ts:81-91` | `modelAvailable` 的目录判定 |
 | `dsh-agent/src/index.ts:551-573` | `agent/created` 的 serial 派发 |
-| `dsh-agent-loop/lib/index.js:1582-1611` | 会话/agent 创建顺序 |
+| `dsh-agent-loop/src/index.ts:622-642` | 会话/agent 创建顺序 |
 | `dsh-agent-loop/src/agent.ts:204-225` | `runMaintenance` 收尾释放排队输入 |
 | `dsh-agent-preset-registry/src/index.ts:81-91` | `defaultId` / `presetForSession()` |
 | `dsh-agent-preset-registry/src/index.ts:364-383` | `agentPresets.select()` |
@@ -205,7 +212,7 @@ DSH 升级后，先复核以下机制，再改插件行为：
 | `dsh-session/src/types.ts:107-122` | session header 的 origin/isSeeded/parentSession 等字段 |
 | `dsh-storage-domain/src/index.ts:119-141`、`domain.ts:166-167,283-301` | `open`/`loadAll` 的 schema 校验与按域写链 |
 | `dsh-storage-json/src/format.ts:28-38`、`single-unit.ts:34` | single-unit 文件封装与落盘路径 |
-| `dsh-app-boot/lib/worker/profile-resolution-bootstrap.js:131-138,460-514` | linked layer 的 peer 拦截 |
+| `dsh-app-boot/src/profile-resolution/resolver.ts:243,636-647` | linked layer 的 peer 拦截 |
 | `dsh-app-boot/src/plugin-compatibility.ts:51-74` | 插件版本闸门（`engines.dsh` 优先） |
 | `dsh-base/cordis.patch.yml:179-190` | 存储根与 JSON/domain 后端 |
 

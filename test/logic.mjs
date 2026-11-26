@@ -134,7 +134,7 @@ function host({ config, services } = {}) {
   return self
 }
 
-const session = (header) => ({ header })
+const session = (header, id = 'session-1') => ({ id, header })
 const blankAgents = { turnBoundaryOf: () => ({ openTurnStartSeq: null, lastTurn: 0 }) }
 const startedAgents = { turnBoundaryOf: () => ({ openTurnStartSeq: 7, lastTurn: 1 }) }
 
@@ -219,21 +219,109 @@ await checkAsync('writeRecord merges, clears fields, and deletes empty records',
   assert.equal(self.table.size, 0)
 })
 
-// ---------------------------------------------------------------- rememberPreset
+// ---------------------------------------------------------------- first turn
 
-await checkAsync('rememberPreset records a non-default preset and clears a default one', async () => {
-  const s = session({ cwd: OTHER, isSeeded: false })
-  let used = 'ptc'
-  const self = host({ services: { agentPresets: { defaultId: 'standard', presetForSession: () => used } } })
+await checkAsync('the first turn records the effective preset and model', async () => {
+  const s = session({ cwd: OTHER, isSeeded: false }, 's1')
+  let used = 'standard'
+  let current = { provider: 'p', model: 'm', reasoningEffort: 'high' }
+  const self = host({
+    services: {
+      agentPresets: { presetForSession: () => used },
+      agents: { get: (id) => id === s.id ? { model: { current: () => current } } : undefined },
+    },
+  })
 
-  self.rememberPreset(s)
+  self.onSessionEvent(s, { type: 'turn/start', data: { turn: 1 } })
   await self.writeChain
-  assert.equal(self.table.get(self.scopeOf(s).key).agentPreset, 'ptc')
+  const first = self.table.get(self.scopeOf(s).key)
+  assert.equal(first.agentPreset, 'standard', 'the default preset is remembered, not dropped')
+  assert.equal(first.provider, 'p')
+  assert.equal(first.model, 'm')
+  assert.equal(first.reasoningEffort, 'high')
 
-  used = 'standard'
-  self.rememberPreset(s)
+  // Later turns in the same conversation must not rewrite the launch defaults.
+  used = 'ptc'
+  current = { provider: 'q', model: 'n' }
+  self.onSessionEvent(s, { type: 'turn/start', data: { turn: 2 } })
   await self.writeChain
-  assert.equal(self.table.get(self.scopeOf(s).key), undefined, 'the default is "no preference"')
+  const later = self.table.get(self.scopeOf(s).key)
+  assert.equal(later.agentPreset, 'standard')
+  assert.equal(later.provider, 'p')
+  assert.equal(later.model, 'm')
+})
+
+await checkAsync('first-turn recording respects config flags', async () => {
+  const s = session({ cwd: ELSEWHERE, isSeeded: false }, 's2')
+  const self = host({
+    config: Plugin.Config({ rememberPreset: false }),
+    services: {
+      agentPresets: { presetForSession: () => 'ptc' },
+      agents: { get: () => ({ model: { current: () => ({ provider: 'q', model: 'n' }) } }) },
+    },
+  })
+
+  self.onSessionEvent(s, { type: 'turn/start', data: { turn: 1 } })
+  await self.writeChain
+  const record = self.table.get(self.scopeOf(s).key)
+  assert.equal(record.agentPreset, undefined, 'rememberPreset false leaves the preset out')
+  assert.equal(record.provider, 'q')
+  assert.equal(record.model, 'n')
+})
+
+await checkAsync('rememberModel false leaves the model out', async () => {
+  const s = session({ cwd: ELSEWHERE, isSeeded: false }, 's5')
+  const self = host({
+    config: Plugin.Config({ rememberModel: false }),
+    services: {
+      agentPresets: { presetForSession: () => 'ptc' },
+      agents: { get: () => ({ model: { current: () => ({ provider: 'q', model: 'n' }) } }) },
+    },
+  })
+
+  self.onSessionEvent(s, { type: 'turn/start', data: { turn: 1 } })
+  await self.writeChain
+  const record = self.table.get(self.scopeOf(s).key)
+  assert.equal(record.agentPreset, 'ptc')
+  assert.equal(record.provider, undefined, 'rememberModel false leaves the model out')
+})
+
+await checkAsync('preset read failures do not block the model half', async () => {
+  const s = session({ cwd: OTHER, isSeeded: false }, 's6')
+  const self = host({
+    services: {
+      agentPresets: { presetForSession: () => { throw new Error('boom') } },
+      agents: { get: () => ({ model: { current: () => ({ provider: 'p', model: 'm' }) } }) },
+    },
+  })
+
+  self.onSessionEvent(s, { type: 'turn/start', data: { turn: 1 } })
+  await self.writeChain
+  const record = self.table.get(self.scopeOf(s).key)
+  assert.equal(record.agentPreset, undefined)
+  assert.equal(record.provider, 'p')
+  assert.equal(self.warns.length, 1)
+})
+
+await checkAsync('first-turn recording tolerates missing services', async () => {
+  const s = session({ cwd: OTHER, isSeeded: false }, 's3')
+  const self = host()
+  self.onSessionEvent(s, { type: 'turn/start', data: { turn: 1 } })
+  await self.writeChain
+  assert.equal(self.table.size, 0)
+})
+
+await checkAsync('model/selection alone does not write workspace memory', async () => {
+  const s = session({ cwd: OTHER, isSeeded: false }, 's4')
+  const self = host({
+    services: {
+      agentPresets: { presetForSession: () => 'ptc' },
+      agents: { get: () => ({ model: { current: () => ({ provider: 'p', model: 'm' }) } }) },
+    },
+  })
+  self.onSessionEvent(s, { type: 'model/selection', data: { provider: 'p', model: 'm' } })
+  await self.writeChain
+  assert.equal(self.table.size, 0, 'only the first turn records launch defaults')
 })
 
 // ---------------------------------------------------------------- applyPreset
@@ -259,6 +347,9 @@ await checkAsync('applyPreset yields to an explicitly requested non-default pres
   running = null
   await self.applyPreset(agent, { agentPreset: 'ptc' })
   assert.equal(calls, 2, 'a session with no recorded preset takes the memory')
+
+  await self.applyPreset(agent, { agentPreset: 'standard' })
+  assert.equal(calls, 3, 'a remembered default preset is applied too')
 })
 
 // ---------------------------------------------------------------- applyModel

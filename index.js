@@ -2,17 +2,18 @@
  * Per-workspace launch defaults.
  *
  * A working directory keeps the agent preset and the provider/model/reasoning
- * effort last used in it, and gets them back on its next blank session.
+ * effort that its newest conversation actually started with, and gets them back
+ * on the next blank session in that directory.
  *
- * What is recorded, and from where:
+ * What is recorded:
  *
- * - `turn/start`      — the preset the turn actually ran under. Recording only
- *                       here keeps the reusable-blank churn out of the memory:
- *                       `session/create` re-composes a reused blank Session
- *                       with the configured default before the Agent exists,
- *                       which is not a user choice.
- * - `model/selection` — a complete model selection committed to the log; the
- *                       Web GUI writes one whenever the user picks a model.
+ * - `turn/start` with `turn === 1` — the first message of a new conversation.
+ *   At that point `presetForSession()` is the preset the turn runs under
+ *   (including the configured default), and `agent.model.current()` is the
+ *   effective model selection (including the deployment default). Recording
+ *   only the first turn keeps the memory aligned with "what the new
+ *   conversation was started with"; later changes inside that conversation do
+ *   not rewrite the workspace preference.
  *
  * Applying happens once, on `agent/created`, while the session is still blank:
  * `agentPresets.select()` is the same call the GUI makes for a new blank
@@ -61,9 +62,9 @@ export default class RememberWorkspaceSettings extends Service {
     applyPreset: z.boolean().default(true),
     /** Re-apply the remembered provider/model/reasoning effort. */
     applyModel: z.boolean().default(true),
-    /** Record the preset a turn ran under into the workspace memory. */
+    /** Record the preset the first message of a new conversation ran under. */
     rememberPreset: z.boolean().default(true),
-    /** Record model switches into the workspace memory. */
+    /** Record the effective model selection at that first message. */
     rememberModel: z.boolean().default(true),
     /** Leave forked sessions alone: neither apply the memory nor record from them. */
     skipForks: z.boolean().default(true),
@@ -110,54 +111,66 @@ export default class RememberWorkspaceSettings extends Service {
   }
 
   /**
-   * Fold one durable session event into the owning directory's record.
+   * Record the first turn of a new conversation. Later turns and model changes
+   * inside the same conversation do not rewrite the workspace preference.
    * @param {any} session - session that appended the event.
    * @param {any} event - committed session event.
    */
   onSessionEvent(session, event) {
     if (!this.config.enabled) return
     try {
-      if (event.type === 'turn/start') {
-        if (this.config.rememberPreset) this.rememberPreset(session)
-        return
-      }
-      if (event.type === 'model/selection') {
-        if (!this.config.rememberModel) return
-        this.remember(session, {
-          provider: event.data.provider,
-          model: event.data.model,
-          reasoningEffort: event.data.reasoningEffort,
-        })
-      }
+      if (event.type !== 'turn/start' || event.data.turn !== 1) return
+      this.rememberLaunch(session)
     } catch (error) {
-      this.warn(`could not record selection: ${describeError(error)}`)
+      this.warn(`could not record launch defaults: ${describeError(error)}`)
     }
   }
 
   /**
-   * Record the preset a turn ran under. A turn on the configured default stores
-   * "no preference" instead of pinning it, so a workspace that never chose a
-   * preset keeps following the deployment default.
-   * @param {any} session - session that started a turn.
+   * Record the preset and effective model selection of a new conversation's
+   * first message. Both halves are independent: a missing service or an
+   * unreadable value leaves that half untouched.
+   * @param {any} session - session whose first turn started.
    */
-  rememberPreset(session) {
-    const presets = this.ctx.get('agentPresets')
-    if (presets === undefined) return
-    const used = presets.presetForSession(session)
-    if (typeof used !== 'string' || used.length === 0) return
-    const fallback = presets.defaultId
-    const preference = typeof fallback === 'string' && used === fallback ? undefined : used
-    this.remember(session, { agentPreset: preference })
+  rememberLaunch(session) {
+    /** @type {Record<string, string | undefined>} */
+    const patch = {}
+    if (this.config.rememberPreset) {
+      try {
+        const presets = this.ctx.get('agentPresets')
+        const preset = presets?.presetForSession(session)
+        if (typeof preset === 'string' && preset.length > 0) patch.agentPreset = preset
+      } catch (error) {
+        this.warn(`could not read preset: ${describeError(error)}`)
+      }
+    }
+    if (this.config.rememberModel) {
+      try {
+        const agents = this.ctx.get('agents')
+        const selection = agents?.get(session.id)?.model?.current()
+        if (selection !== undefined
+          && typeof selection.provider === 'string' && selection.provider.length > 0
+          && typeof selection.model === 'string' && selection.model.length > 0) {
+          patch.provider = selection.provider
+          patch.model = selection.model
+          patch.reasoningEffort = selection.reasoningEffort ?? undefined
+        }
+      } catch (error) {
+        this.warn(`could not read model: ${describeError(error)}`)
+      }
+    }
+    this.remember(session, patch)
   }
 
   /**
    * Queue one read-merge-write against the workspace record. Queueing keeps a
-   * preset event and a model event that arrive together from overwriting each
+   * preset and a model recorded at the same first turn from overwriting each
    * other with a stale read.
    * @param {any} session - session whose cwd names the workspace.
    * @param {Record<string, string | undefined>} patch - fields to merge.
    */
   remember(session, patch) {
+    if (Object.keys(patch).length === 0) return
     const scope = this.scopeOf(session)
     if (scope === undefined) return
     this.writeChain = this.writeChain
@@ -176,8 +189,9 @@ export default class RememberWorkspaceSettings extends Service {
     const previous = table.get(scope.key)
     const next = { ...previous, ...patch, path: scope.cwd, updatedAt: Date.now() }
     // An explicit `undefined` means "forget this field": an absent reasoning
-    // effort returns to the adapter default, and an absent preset means "no
-    // preference". Drop the key instead of merging the old value forward.
+    // effort returns to the adapter default, and an absent preset leaves no
+    // preset preference (for example, when no preset roster is composed).
+    // Drop the key instead of merging the old value forward.
     for (const field of REMEMBERED_FIELDS) {
       if (next[field] === undefined) delete next[field]
     }
@@ -214,7 +228,9 @@ export default class RememberWorkspaceSettings extends Service {
 
   /**
    * Switch the blank session to the remembered preset, unless the creation
-   * request named a different preset on purpose (Creator mode, for example).
+   * request named a different non-default preset on purpose (Creator mode, for
+   * example). A remembered default preset is applied too; the registry no-ops
+   * when the session already runs it.
    * @param {any} agent - blank agent.
    * @param {any} memory - workspace record.
    */
@@ -237,7 +253,7 @@ export default class RememberWorkspaceSettings extends Service {
   }
 
   /**
-   * Record the remembered model selection on the blank session. Validation
+   * Apply the remembered model selection to the blank session. Validation
    * happens first: a provider that is signed out or a model that left the
    * catalog leaves the deployment default in place instead of failing a turn.
    * @param {any} agent - blank agent.

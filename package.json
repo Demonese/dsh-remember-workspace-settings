@@ -1,8 +1,8 @@
 {
   "name": "dsh-remember-workspace-settings",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Remembers the agent preset and the provider/model/reasoning-effort last used in each working directory, and re-applies them to that workspace's next blank session.",
+  "description": "Remembers the agent preset and the provider/model/reasoning effort a new conversation actually used at its first message in each working directory, and re-applies them to that workspace's next blank session.",
   "license": "MIT",
   "author": "chuikingshek <git@chuikingshek.com>",
   "keywords": [

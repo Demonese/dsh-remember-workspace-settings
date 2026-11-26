@@ -20,19 +20,19 @@
 | 默认 preset | `agent-preset-registry` 行的 `selectedDefault`（写进 profile patch） | 全进程一个 |
 | 默认模型 | `agent-default-model` 行的 `provider / model / reasoningEffort` | 全进程一个 |
 | 单会话 preset | 会话日志的 `agent-preset/selected` | 单个会话 |
-| 单会话模型 | 会话日志的 `model/selection` | 单个会话 |
+| 单会话模型 | 会话日志的 `model/selection`；没有记录时由 `agentOptions` 提供全局默认 | 单个会话（无记录时跟随全进程默认） |
 
 两个细节决定了需求的形状：
 
 1. **换模型会顺手改全局默认。** GUI 的模型选择走 `session/selectModel`，它在记录会话选择之后还会后台调用 `agentDefaultModel.saveSelection(selected)`。所以“上次用的模型”确实被记住了，但记住的是**全局**的：在 A 工作区换了模型，B 工作区的新会话也会跟着用。
 2. **换 preset 不会改全局默认。** UI 上换模式只写会话日志，`selectedDefault` 只在 Settings 里改。所以在没有本插件时，未显式指定 preset 的新会话会回到配置里的那个默认 preset；显式指定的非默认 preset 仍按请求运行。
 
-目标因此是：把这两套全局记忆降维成**按工作目录**的记忆，并补上 preset 那条缺失的路径。
+目标因此是：在**新对话发送第一条用户消息时**，把该对话实际使用的 preset 与 model（provider + model + reasoning effort）记到工作目录；下次在同一工作目录新建或冷恢复空白会话时，再应用这组值。默认 preset 和全局默认模型同样是“实际使用”的值，也要记录。
 
 设计原则：
 
 - 记忆属于工作目录，不属于会话或整个部署；
-- 只记录真正发生过的选择，不记录“可能想用”的状态；
+- 以新对话首条消息实际使用的值为准，包括默认 preset 和当前生效的全局默认模型；同一会话后续再改 preset/model 不重写工作区记忆；
 - 只改尚未开始对话的会话，不干扰进行中的对话；
 - 只使用 DSH 正常的会话事件与 Service API，不追加自定义事件类型；
 - 任何失败都降级处理，绝不阻塞会话创建。
@@ -45,9 +45,10 @@
 │  storageDomain("workspace_launch_defaults")                                   │
 │      └─ table("workspaces")  key = 规范化 cwd                                  │
 │                                                                               │
-│  remember:  session/event ── turn/start ────────→ 读 presetForSession          │
-│             session/event ── model/selection ───→ provider/model/effort        │
-│                              └───────────────→ put(key, mergedRecord)          │
+│  remember:  session/event ── turn/start（turn === 1）                           │
+│                 ├─ presetForSession                                              │
+│                 ├─ agent.model.current()                                        │
+│                 └─ put(key, mergedRecord)                                       │
 │                                                                               │
 │  recall:    agent/created ── 空白 && 非 subagent && 非 fork                     │
 │                 ├─ agentPresets.select(agent, 记忆 preset)（当前为默认/未记录时）│
@@ -55,15 +56,15 @@
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-图中的 recall 只覆盖新建/冷恢复路径；live blank 复用不派发 `agent/created`，不会进入 recall。remember 分支仍会收到 live 会话的 `turn/start` 与 `model/selection`（见 §5）。
+图中的 recall 只覆盖新建/冷恢复路径；live blank 复用不派发 `agent/created`，不会进入 recall。remember 只记录新会话的 `turn/start`（`turn === 1`）；live 复用后的首轮也会被记录，见 §5。
 
 记录形状：
 
 ```js
 {
   path: '/home/you/projects/demo',   // 显示用，保留会话创建时的写法
-  agentPreset: 'ptc',                // 可选；默认预设等于没有偏好
-  provider: 'your-provider',         // 与 model 成对出现
+  agentPreset: 'ptc',                // 首条消息实际使用的 preset；可能是默认 preset
+  provider: 'your-provider',         // 与 model 成对出现；没有可读 selection 时缺失
   model: 'your-model',
   reasoningEffort: 'high',           // 可选
   updatedAt: 1764000000000,          // epoch ms
@@ -82,17 +83,20 @@
 | `agent/created` | serial、被 await；新建和冷恢复时在 agent 进入 registry 后、创建响应返回前触发；冷恢复有历史的会话（`agents.resume`）也会触发，事件本身不保证空白 | 新建/冷恢复路径的应用窗口；监听器必须自行用 `isBlank` 过滤（冷恢复的历史会话可能已有 turn）；抛错会让整个创建失败，必须整段 catch |
 | `agentPresets.select()` | 只能用于空白会话；相同值 no-op；按 agent 串行；成功时 append `agent-preset/selected` | 可以安全地重复应用记忆；已开始的会话由 registry 拒绝 |
 | `agent.model.select()` | 只 append `model/selection`，不改全局默认 | 应用模型用这个低层写入，不能用 `session/selectModel` |
-| `turn/start` | 记录这一轮实际运行的 preset 的可靠时机 | 记录 preset 用 `turn/start`，不用创建阶段的 `agent-preset/selected` |
+| `agentPresets.presetForSession()` | 返回会话实际记录的 preset，包括默认 preset | 首条消息按这个值记录，不再把默认值转换成“无偏好” |
+| `agent.model.current()` | 返回会话已记录的模型选择；没有记录时返回 live options（即全局默认） | 首条消息记录“实际生效”的 provider/model/effort，包括跟随全局默认的情况 |
+| `turn/start` | 新会话的 `turn === 1` 时，preset 已确定，模型选择也已可读 | 记录首条消息用 `turn/start`，只处理 `turn === 1`；不用 `model/selection` 或 `agent-preset/selected` 作为记录源 |
 | `ctx.storageDomain` | 提供 schema 校验、同步读、持久写和按域写链 | 插件用独立 domain 存记忆；记忆本身不写会话日志、不进入模型上下文 |
 | 会话 header | 子代理 `origin === 'subagent'`；fork 用 `isSeeded`（旧格式可能带 `parentSession`） | 子代理始终跳过，fork 默认跳过 |
 | linked layer | 从插件目录向上逐层读取 `peerDependencies`，命中即拦截到安装树；插件自身 manifest 的声明是实际生效的那一份 | 四个运行时包必须列 peer，`dependencies` 不得声明（空对象也会被测试拒绝） |
 
 ## 4. 关键实现决定
 
-- **同一 key 的读-改-写串行化（`writeChain`）。** 预设事件和模型事件可能几乎同时到达；串行化避免两次读拿到同一份旧记录、后写覆盖先写。写链失败只 warn，不阻断后续写入。
-- **`undefined` 表示删除字段。** 清除推理强度会回到适配器默认；清除预设表示“没有偏好”。字段全空时删除整条记录，不留空壳。
-- **默认预设 = 无偏好。** 用默认预设跑的一轮清掉 `agentPreset`，让工作区继续跟随 Settings 里默认值的变化，而不是被钉死在旧值。
-- **显式预设让位（仅限非默认）。** 创建请求显式点名了非默认 preset（Creator 等流程）时，`applyPreset` 不覆盖；显式点名默认 preset 与按默认创建在 header/projection 上不可区分，仍会被记忆覆盖；没有记录预设的会话会接受记忆值。
+- **同一 key 的读-改-写串行化（`writeChain`）。** 不同会话的首条消息可能几乎同时到达；串行化避免两次读拿到同一份旧记录、后写覆盖先写。写链失败只 warn，不阻断后续写入。
+- **首条消息一次性记录 preset 与 model。** 只在 `turn/start` 且 `turn === 1` 时读 `presetForSession()` 与 `agent.model.current()`，把两半合并成一次 `put`；首条消息之后再改 preset/model 不重写工作区记忆。
+- **记录实际值，包括默认值。** 默认 preset 和跟随全局默认的模型都是新对话实际使用的值，照常写入。这样工作区会“钉住”当次首条消息的选择；Settings 里改默认 preset/模型不会影响已经有记忆的工作区。
+- **`undefined` 表示未知或“无显式 effort”。** 首条消息时如果读不到 preset/model（例如没有 preset roster、agent 不可用），只跳过对应的一半，不用 `undefined` 去清掉旧记录；如果读到了 model 但 `reasoningEffort` 缺失，表示回到适配器默认，写入时清掉旧 effort。`writeRecord` 仍保留“显式 undefined 删除字段”的内部语义。
+- **显式预设让位（仅限非默认）。** 创建请求显式点名了非默认 preset（Creator 等流程）时，`applyPreset` 不覆盖；显式点名默认 preset 与按默认创建在 header/projection 上不可区分，仍会被记忆覆盖；运行时没有记录 preset 的会话会接受记忆值。该会话首条消息会把实际运行的 preset 记回工作区。
 - **模型先比当前选择，再解析调用配置，最后写。** 相同选择直接跳过（连校验也不做）；不同选择才通过 `llm.resolveCallConfig(target)` 验证 provider 有已注册 adapter、模型信息可解析、显式 reasoning effort 被支持；它不检查登录凭证或目录可选性（`session/selectModel` 才额外做 `requireModel` / `modelAvailable`）。失败只跳过模型这一半并 warn。
 - **不写重复事件。** 应用前先比 `agent.model.current()`；记录时比较除 `updatedAt` 外的字段。注意 `agent.model.select` 只和已记录值比较，没有记录时会无条件 append，所以应用侧的去重必须自己做。
 - **绝不改全局默认。** 只调用 `agent.model.select()`；`session/selectModel` 会顺手 `agentDefaultModel.saveSelection`，禁止使用。
@@ -108,30 +112,32 @@
 |---|---|---|
 | 子代理会话 | 既不记录也不应用 | `header.origin === 'subagent'` |
 | fork 会话 | 默认跳过；`skipForks: false` 时参与 | `header.isSeeded === true`（现代 fork）或 `parentSession` |
-| 打开有历史的会话 | 不应用 | `openTurnStartSeq === null && lastTurn === 0` |
+| 打开有历史的会话 | 不应用 | 仅当 `openTurnStartSeq === null && lastTurn === 0`（空白）时应用；有历史时该条件为假 |
 | 复用已落盘的空白会话（冷恢复） | 按 §4 规则重新应用记忆（显式非默认请求除外）；重复应用同一值 → 无副作用 | `agents.resume` → `agent/created`；`presets.select` 与 `model.select` 的相等判定 |
-| 复用进程内仍存活的空白会话（live） | Host 直接 `presets.select` 到请求/默认值，不触发 `agent/created`；插件不参与，下一轮 `turn/start` 可能把工作区预设偏好清掉 | `reuseLive()`；见探索笔记 §1/§2 |
+| 复用进程内仍存活的空白会话（live） | Host 直接 `presets.select` 到请求/默认值，不触发 `agent/created`；插件不重新应用记忆。该会话首条消息会把 Host 当时的实际 preset/model 记回工作区，可能覆盖原偏好 | `reuseLive()`；见探索笔记 §1/§2 |
 | 记忆里的 preset 被删/改名 | 保留当前预设，warn | `select` 抛 `agent-preset/not-found` / `invalid` |
 | 模型没有 adapter / 元信息不可用 / effort 不支持 | 只跳过模型，preset 照常 | `resolveCallConfig` 抛错 |
 | provider 未登录 / 模型不在目录中 | 不保证拦截；可能先应用，真实请求时才失败 | 这里只调 `resolveCallConfig`，不做 `requireModel` / `modelAvailable` |
-| 用户在空白会话里手动改 preset/model | 模型立即记录；预设在下一轮 `turn/start` 记录 | `turn/start` 与 `model/selection` 都会进 remember |
+| 用户在空白会话里手动改 preset/model | 随首条消息一起记录；首条消息之后再改不重写工作区记忆 | `turn/start`（`turn === 1`）读取 `presetForSession()` 与 `agent.model.current()` |
+| Settings 修改全局默认 preset/model | 已有记忆的工作区继续用记忆值；没有记忆的工作区用新默认 | 记录的是首条消息实际值 |
 | 多窗口 / 多进程同时写 | 同进程内单一写链；跨进程没有文件锁，后写者按整份内存快照重写 unit 文件，可能覆盖其他进程的写入/删除 | storage-domain 的按域写链只在进程内；storage-json 只做原子整文件替换 |
 | 工作区改名/移动 | 变成一份新记忆，旧记录保留 | 按 cwd 作 key 的固有限制 |
 | 目录大小写差异 | Windows 下键转小写 | `workspaceKey()` |
 | symlink 指向同一目录 | 不做 `realpath`，按传入 cwd 的绝对路径分别记忆 | `workspaceKey()` |
 | git worktree | 每个 worktree 各自一份记忆 | worktree 的 cwd 不同 |
-| 首次应用的重挂载（新建/冷恢复） | 记忆 preset 存在且与 Host 目标不同时多一次 mount/unmount；没有 preset 记忆或值相同时为 0 | 发生在 creation resolve 前；live 复用不触发插件 |
+| 首次应用的重挂载（新建/冷恢复） | 记忆 preset 存在且与 Host 目标不同时多一次 mount/unmount；没有 preset 记忆或值相同（包括记忆默认 = Host 默认）时为 0 | 发生在 creation resolve 前；live 复用不触发插件 |
 | 插件自身抛错 | 不影响会话创建 | 全量 try/catch |
 | 存储文件损坏 / 版本不匹配 / 记录不符合 schema | 记录 warning，以“无记忆”状态继续 | `storageDomain.open()` 失败被捕获；默认不跳过坏记录 |
 
 其中需要特别理解的取舍：
 
-- **会多一次组合挂载。** 当记忆里确实有非默认 preset、且与 Host 的默认目标不同时，按默认预设冷恢复一个已有空白会话会先用默认预设组装它，插件随后切到记忆值，因此比不用插件多一次预设重挂载（空白会话上成本很小）。这是 Host 创建路径决定的，Host-only 方案绕不开。live 复用不触发 `agent/created`，不会发生这次插件侧重挂载；没有 preset 记忆或值相同时也不会有额外重挂载。
-- **预设只按“实际跑过”记录。** 空白会话里选好模式但没发消息，不会被记住。这是有意的：记忆应当反映真实使用，而不是界面上的临时状态。
+- **会多一次组合挂载。** 当记忆里确实有 preset、且与 Host 当前目标不同时，按默认预设冷恢复一个已有空白会话会先用默认预设组装它，插件随后切到记忆值，因此比不用插件多一次预设重挂载（空白会话上成本很小）。这是 Host 创建路径决定的，Host-only 方案绕不开。live 复用不触发 `agent/created`，不会发生这次插件侧重挂载；没有 preset 记忆或值相同时也不会有额外重挂载。
+- **首条消息时记录实际 preset，包括默认 preset。** 空白会话里选好模式但没发消息，不会被记住；首条消息之后再改 preset/model 也不会重写工作区记忆。工作区因此会“钉住”其最近一次新对话首条消息使用的值；Settings 改全局默认不会再影响已有记忆的工作区，想跟随新默认需删除该工作区记录或用新默认重发一条首条消息。
 - **模型没有“创建时参数”。** 应用时机是会话刚创建、尚未开始。正常客户端等待 `session/create` 响应后才发第一条消息，此时新建/冷恢复路径的应用已经完成；live 复用不派发 `agent/created`，插件不会重新应用。只有绕过创建响应、在创建尚未 resolve 时直接用同一 sessionId 发消息的流程才理论上有窗口。
-- **GUI 的模型选择会改全局默认。** 这是 `session/selectModel` 的行为；插件自身不改。因此“新会话初始模型恰好等于记忆值”时没有写入事件是正常现象；此时该空白会话没有 `model/selection` 记录，仍跟随全局默认，首轮前若默认被改，本次会话会用新默认（下一个新建/冷恢复的空白会话才会重新应用记忆）。
+- **GUI 的模型选择会改全局默认。** 这是 `session/selectModel` 的行为；插件自身不改。工作区记忆在首条消息时已经记下实际模型（包括当时跟随的全局默认），所以下一次新建/冷恢复会应用记忆；已有记忆的工作区不再被其他工作区换模型影响。没有记忆的工作区（还没发过首条消息）仍跟随全局默认。
+- **live 复用可能覆盖记忆。** Host 在 `reuseLive()` 里可能先把 blank 会话的 preset 切到请求/默认值；插件不会重新应用记忆，该会话首条消息会把 Host 当时的值记回工作区。也就是说，打开一个未发消息的空白会话后如果 Host 重置了 preset，再发首条消息会把原工作区偏好覆盖。这个路径没有 `agent/created`，Host-only 方案无法可靠区分“Host 重置”和“用户主动选择”。
 - **没有设置页。** 查看/清除记忆需要直接编辑存储 JSON；清除后该工作区回到全局默认。
-- **Creator 的连带效果。** 前提是 Creator（`cordis`）不是当前默认 preset：在某个工作区用 Creator 模式跑过一轮后，该工作区下次新建或冷恢复的空白会话也会是 Creator 模式——这就是“上次使用”的语义；切回默认预设跑一轮即可清除该偏好。若该空白仍是 live 会话并被再次复用，Host 可能先切到请求/默认预设，下一轮会清掉该偏好。
+- **Creator 的连带效果。** 在某个工作区用 Creator（`cordis`）新对话并发首条消息后，该工作区下次新建或冷恢复的空白会话也会是 Creator 模式——这是“最近一次新对话首条消息”的语义；要切回，用目标 preset 新建对话并发首条消息，而不是在旧会话里改。若该空白仍是 live 会话并被再次复用，Host 可能先切到请求/默认预设，首条消息会把该值记回。
 
 ## 6. 安装、配置与数据
 
@@ -147,13 +153,15 @@
 
 ### 6.2 用法与验证
 
-装好即生效，不需要任何界面操作：正常地在 Web GUI 里换模式、换模型即可。想让它消失，停用插件即可（已保存的值会保留）。
+装好即生效，不需要任何界面操作：新建对话时选好模式/模型，再发送第一条消息；插件记录的是这条消息实际使用的值。想让它消失，停用插件即可（已保存的值会保留）。
 
 验证方法：
 
-1. 在 A 工作区把模型换成 X、模式换成 P，**并发送一条消息**（预设以“实际跑过一轮”为准）；
-2. 在 A 工作区新建会话 → 应直接是 P + X；
-3. 切到 B 工作区新建会话 → 应仍是 B 自己的选择，或全局默认。
+1. 在 A 工作区新建会话，选好模式 P、模型 X（P/X 是默认值也可以），**发送第一条消息**；插件记录的是这条消息实际使用的值；
+2. 在 A 工作区再新建会话 → 应直接是 P + X，即使 Settings 里的默认值已经改过；
+3. 切到 B 工作区新建会话 → 应仍是 B 自己的记忆；B 从未发过首条消息时使用全局默认。
+
+从旧版本升级时存储结构不变，旧记录继续有效。旧版本没有记录默认 preset 的工作区，会在下一次新对话首条消息时补记实际 preset；从未记录过模型的工作区，会在同一时刻记录当时的全局默认模型。若这个全局默认已经被其他工作区改过，需要在该工作区重新选一次模型。
 
 ### 6.3 配置
 
@@ -164,8 +172,8 @@
 | `enabled` | `true` | 总开关；关闭后既不记录也不应用 |
 | `applyPreset` | `true` | 是否把记忆的预设应用到新建/冷恢复的空白会话 |
 | `applyModel` | `true` | 是否把记忆的模型/推理强度应用到新建/冷恢复的空白会话 |
-| `rememberPreset` | `true` | 是否把“实际运行的预设”记入工作区记忆 |
-| `rememberModel` | `true` | 是否把模型变更记入工作区记忆 |
+| `rememberPreset` | `true` | 是否在新建会话首条消息时记录实际 preset（包括默认 preset） |
+| `rememberModel` | `true` | 是否在新建会话首条消息时记录实际 provider/model/effort（包括跟随的全局默认） |
 | `skipForks` | `true` | fork 出来的会话不参与（既不应用也不记录） |
 | `verbose` | `false` | 每次应用/记录都写一条 info 日志（排查时打开） |
 
@@ -208,7 +216,7 @@ $DSH_HOME/storages/workspace_launch_defaults.json
 }
 ```
 
-存储键是规范化后的绝对工作目录：`path.resolve(cwd)`，Windows 上再转小写；记录里的 `path` 保留会话创建时的写法，便于阅读。
+存储键是规范化后的绝对工作目录：`path.resolve(cwd)`，Windows 上再转小写；记录里的 `path` 保留会话创建时的写法，便于阅读。`agentPreset` 是该工作区最近一次新对话首条消息实际使用的 preset，可能就是默认 preset；`provider / model / reasoningEffort` 是同一时刻实际生效的模型选择，跟随全局默认时也会写入。
 
 **重置某个工作区**：停掉 DSH，删除 `tables.workspaces` 里对应的键（或整个文件），再启动。文件损坏或版本不匹配时，插件会记录一条 warning 并以“无记忆”状态继续运行，不会阻塞 DSH 启动。
 
